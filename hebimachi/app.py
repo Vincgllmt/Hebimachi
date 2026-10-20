@@ -15,7 +15,7 @@ from .capture import Config, crop, enable_dpi_awareness, grab_screen, list_monit
 from .defense import Opponent
 from .efficiency import estimate_draws_left, simulate_tenpai
 from .recognition import TileMatcher
-from .tiles import display_name, format_labels, parse, parse_labels, to_counts
+from .tiles import display_name, format_labels, label_to_index, parse, parse_labels, to_counts
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -29,6 +29,10 @@ RIVER_TITLES = {
     "kamicha": "Rivière de KAMICHA (joueur de gauche)",
 }
 AUTO_INTERVAL_MS = 1500
+HAND_THRESHOLD = 0.78   # sous ce score, l'écran est sans doute flou (menu pause) ou masqué
+PANEL_BG = "#1f4d36"
+HAND_TILE_W, HAND_TILE_H = 54, 74
+CHOICE_COLORS = ("#ff3b3b", "#ffb020", "#ffe066")  # 1er, 2e, 3e choix
 
 
 def to_photo(img_bgr: np.ndarray, scale: float = 1.0) -> ImageTk.PhotoImage:
@@ -198,6 +202,19 @@ class App:
         ttk.Button(bar, text="Zones…", command=self.calibrate).pack(side="left")
         ttk.Button(bar, text="Apprendre les tuiles…", command=lambda: LearnDialog(self)).pack(side="left", padx=4)
 
+        # Bandeau du conseil : ce qu'il faut jouer, en gros, sur l'image de la main.
+        panel = tk.Frame(self.root, bg=PANEL_BG, padx=12, pady=8)
+        panel.pack(fill="x", padx=6, pady=(0, 6))
+        self.advice_var = tk.StringVar(value="En attente d'une main…")
+        tk.Label(panel, textvariable=self.advice_var, bg=PANEL_BG, fg="white",
+                 font=("Segoe UI", 22, "bold"), anchor="w").pack(fill="x")
+        self.advice_detail = tk.StringVar()
+        tk.Label(panel, textvariable=self.advice_detail, bg=PANEL_BG, fg="#cfe8d6",
+                 font=("Segoe UI", 12), anchor="w", justify="left", wraplength=1120).pack(fill="x")
+        self.hand_canvas = tk.Canvas(panel, height=HAND_TILE_H + 34, bg=PANEL_BG, highlightthickness=0)
+        self.hand_canvas.pack(fill="x", pady=(6, 0))
+        self.tile_photos: list[ImageTk.PhotoImage] = []
+
         form = ttk.LabelFrame(self.root, text="Situation (corrigez au besoin — notation 123m406p77z)", padding=8)
         form.pack(fill="x", padx=6)
         self.vars: dict[str, tk.StringVar] = {}
@@ -234,7 +251,7 @@ class App:
         heads = ("#", "Défausse", "Shanten", "Tuiles acceptées", "Ukeire", "P(pioche)",
                  "P(avance)", "P(tenpai) MC", "Danger", "Défense")
         widths = (30, 70, 60, 260, 55, 75, 75, 90, 65, 330)
-        self.tree = ttk.Treeview(self.root, columns=cols, show="headings", height=14)
+        self.tree = ttk.Treeview(self.root, columns=cols, show="headings", height=8)
         for c, h, w in zip(cols, heads, widths):
             self.tree.heading(c, text=h)
             self.tree.column(c, width=w, anchor="w" if c in ("accept", "why") else "center")
@@ -271,7 +288,7 @@ class App:
             return
         self.config.monitor = index
         # Les zones sont relatives à l'écran : elles ne valent plus rien sur un autre écran.
-        self.config.hand = self.config.dora = None
+        self.config.hand = self.config.dora = self.config.calls = None
         self.config.rivers = {}
         self.config.save(CONFIG_PATH)
         self.last_image = None
@@ -280,7 +297,8 @@ class App:
     def calibrate(self):
         img = self.current_image(force_grab=True)
         for key, title in (("hand", "Zone de VOTRE MAIN (un peu de marge en hauteur)"),
-                           ("dora", "Zone des INDICATEURS DORA")):
+                           ("dora", "Zone des INDICATEURS DORA"),
+                           ("calls", "Zone de VOS APPELS (chi/pon/kan) : du milieu de la main jusqu'au bord droit")):
             sel = RegionSelector(self.root, img, title)
             self.root.wait_window(sel)
             if sel.result:
@@ -294,6 +312,15 @@ class App:
         self.status(f"Zones enregistrées : main={self.config.hand} dora={self.config.dora} "
                     f"rivières={', '.join(self.config.rivers) or 'aucune'}")
 
+    def _read_calls(self, img: np.ndarray, hand_dets) -> list | None:
+        """Tuiles de nos appels, plus petites que celles de la main (ce qui écarte la tuile piochée)."""
+        calls_img = crop(img, self.config.calls)
+        if calls_img is None or not hand_dets:
+            return None
+        max_long = 0.9 * max(d.h for d in hand_dets)
+        dets = self.matcher.read_tiles(calls_img, max_long=max_long)
+        return dets or None
+
     def capture(self):
         if not self.config.hand:
             self.status("Définissez d'abord les zones (bouton « Zones… »).")
@@ -304,8 +331,22 @@ class App:
         img = self.current_image(force_grab=True)
         hand_img = crop(img, self.config.hand)
         dets = self.matcher.detect(hand_img, threshold=self.config.threshold) if hand_img is not None else []
+        calls = self._read_calls(img, dets)
+        if calls is not None:
+            # Les tuiles appelées ne font pas partie de la main, même si les zones se chevauchent.
+            left = self.config.calls[0] + min(d.x for d in calls)
+            dets = [d for d in dets if self.config.hand[0] + d.x + d.w <= left]
+        melds = len(calls) // 3 if calls else 0
+        worst = min((d.score for d in dets), default=0.0)
+        if len(dets) + 3 * melds not in (13, 14) or worst < HAND_THRESHOLD:
+            # Écran flou (menu pause), animation ou fenêtre masquée : on garde la dernière analyse.
+            self.status(f"Écran illisible ({len(dets)} tuiles, score min {worst:.2f}) — jeu en pause, "
+                        "animation ou fenêtre masquée ? Dernière analyse conservée.")
+            return
         before = {k: v.get() for k, v in self.vars.items()}
         self.vars["hand"].set(format_labels([d.label for d in dets]))
+        groups = [calls[i:i + 3] for i in range(0, 3 * melds, 3)] if calls else []
+        self.vars["calls"].set(" ".join(format_labels([d.label for d in g]) for g in groups))
         dora_img = crop(img, self.config.dora)
         if dora_img is not None:
             self.vars["dora"].set(format_labels([d.label for d in self.matcher.read_tiles(dora_img)]))
@@ -352,14 +393,99 @@ class App:
             visible_tiles += [t for o in opponents for t in o.discards]
             visible = to_counts(visible_tiles)
             total_discards = len(mine) + sum(len(o.discards) for o in opponents)
-            adv = advise(hand, visible, opponents, melds, estimate_draws_left(total_discards))
+            adv = advise(hand, visible, opponents, melds, estimate_draws_left(total_discards), calls)
         except ValueError as exc:
             self.summary.set(f"Erreur : {exc}")
+            self.advice_var.set("Main à vérifier")
+            self.advice_detail.set(f"{exc}. Corrigez le champ « Main » (13 ou 14 tuiles, appels compris).")
             return
         self._show(adv, melds)
 
+    # ---------- affichage du conseil ----------
+    def _advice_text(self, adv: Advice) -> tuple[str, str]:
+        a, best = adv.analysis, adv.ranked[0]
+
+        def tiles_list(c) -> str:
+            return ", ".join(display_name(t) for t in sorted(c.ukeire))
+
+        if a.shanten == -1:
+            return "TSUMO ! Main complète", "Déclarez la victoire (si vous avez un yaku)."
+        if best.discard is None:  # 13 tuiles : ce n'est pas à nous de jeter
+            if best.shanten == 0:
+                return "Tenpai — en attente", f"Attente : {tiles_list(best)} ({best.total} tuiles restantes)."
+            return "En attente de votre pioche", f"{best.shanten}-shanten, {best.total} tuiles utiles."
+
+        name = display_name(best.discard)
+        danger = adv.danger.get(best.discard, (None, ""))[0]
+        if best.shanten == 0:
+            title = f"Jetez {name}  →  TENPAI"
+            detail = f"Attente : {tiles_list(best)} ({best.total} tuiles restantes)."
+            if a.shanten == 0 and not adv.danger:
+                detail += " Déclarez riichi si votre main est fermée et sans yaku."
+        else:
+            title = f"Jetez {name}"
+            detail = (f"Vous restez à {best.shanten}-shanten avec {best.total} tuiles utiles "
+                      f"({best.p_next:.0%} de chances d'avancer à la prochaine pioche).")
+        if adv.mode == "Défense":
+            detail = f"Riichi adverse : tuile la plus sûre ({danger:.1f} % de risque). On abandonne la main."
+        elif danger is not None:
+            detail += f" Risque face au riichi : {danger:.1f} %."
+        others = [display_name(c.discard) for c in adv.ranked[1:3]
+                  if c.shanten == best.shanten and c.discard is not None]
+        if others:
+            detail += f"  Autres bons choix : {', '.join(others)}."
+        if adv.warning:
+            detail = f"⚠ {adv.warning}\n{detail}"
+        return title, detail
+
+    def _draw_hand(self, adv: Advice):
+        """Main en images, le 1er choix encadré en rouge (puis orange, jaune)."""
+        cv = self.hand_canvas
+        cv.delete("all")
+        self.tile_photos = []
+        try:
+            labels = parse_labels(self.vars["hand"].get())
+        except ValueError:
+            return
+        choices = [c.discard for c in adv.ranked[:3] if c.discard is not None]
+        marked = {}  # position dans la main -> rang du choix
+        for rank, tile in enumerate(choices):
+            pos = [i for i, lb in enumerate(labels) if label_to_index(lb) == tile and i not in marked]
+            if pos:
+                # On garde les cinq rouges, et on préfère jeter la tuile piochée (la dernière).
+                plain = [i for i in pos if labels[i][0] != "0"] or pos
+                marked[plain[-1]] = rank
+        x = 4
+        for i, lb in enumerate(labels):
+            if i == len(labels) - 1 and len(labels) % 3 == 2:
+                x += 14  # écart de la tuile piochée, comme dans le jeu
+            y = 18
+            if i in marked:
+                y = 6 if marked[i] == 0 else 12  # le meilleur choix « sort » de la main
+            tpl = self.matcher.templates.get(lb)
+            if tpl is not None:
+                photo = to_photo(cv2.resize(tpl, (HAND_TILE_W, HAND_TILE_H), interpolation=cv2.INTER_AREA))
+                self.tile_photos.append(photo)
+                cv.create_image(x, y, anchor="nw", image=photo)
+            else:
+                cv.create_rectangle(x, y, x + HAND_TILE_W, y + HAND_TILE_H, fill="#f4f0e6")
+                cv.create_text(x + HAND_TILE_W / 2, y + HAND_TILE_H / 2, text=lb, font=("Segoe UI", 14, "bold"))
+            if i in marked:
+                r = marked[i]
+                width = 5 if r == 0 else 3
+                cv.create_rectangle(x - 3, y - 3, x + HAND_TILE_W + 3, y + HAND_TILE_H + 3,
+                                    outline=CHOICE_COLORS[r], width=width)
+                if r == 0:
+                    cv.create_text(x + HAND_TILE_W / 2, y + HAND_TILE_H + 12, text="▲ JETER",
+                                   fill=CHOICE_COLORS[0], font=("Segoe UI", 10, "bold"))
+            x += HAND_TILE_W + 4
+
     def _show(self, adv: Advice, melds: int):
         a = adv.analysis
+        title, detail = self._advice_text(adv)
+        self.advice_var.set(title)
+        self.advice_detail.set(detail)
+        self._draw_hand(adv)
         state = {-1: "Main complète (agari) !", 0: "Tenpai"}.get(a.shanten, f"{a.shanten}-shanten")
         self.summary.set(f"{state}   •   Mode : {adv.mode}   •   Tuiles invisibles : {a.unseen}"
                          f"   •   Pioches restantes estimées : {a.draws_left}")

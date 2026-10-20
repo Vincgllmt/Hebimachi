@@ -71,3 +71,18 @@ def test_advisor_defends_far_hand():
     adv = advise(hand, to_counts(parse("3z")), [opp])
     assert adv.mode == "Défense"
     assert adv.ranked[0].discard == parse("3z")[0]  # genbutsu
+
+
+def test_open_hand_without_yaku_is_flagged():
+    # chi 567p déjà fait ; en jetant 7s on attend 3m, sans aucun yaku
+    hand = parse("12789m05888s7s")
+    adv = advise(hand, [0] * 34, [], melds=1, calls=parse("067p"))
+    assert adv.ranked[0].discard == parse("7s")[0]
+    assert "SANS YAKU" in adv.warning
+
+
+def test_open_tanyao_is_fine():
+    # chi 456p ; en jetant le 1m pioché on attend 5s/8s, tout en tanyao
+    adv = advise(parse("234m66p345s67s1m"), [0] * 34, [], melds=1, calls=parse("456p"))
+    assert adv.ranked[0].discard == parse("1m")[0]
+    assert adv.warning == ""

@@ -118,11 +118,16 @@ class TileMatcher:
             self._save(label, crop, overwrite)
         self.reload()
 
-    def learn_tile(self, tile: np.ndarray, label: str, overwrite: bool = False) -> None:
+    def learn_tile(self, tile: np.ndarray, label: str, overwrite: bool = False,
+                   inset: float = 0.04) -> None:
         """Modèle à partir d'une tuile isolée (ex. une tuile de rivière, plus petite)."""
         size = self.tile_size
         if size is None:
             raise ValueError("Apprenez d'abord des tuiles de la main (taille de référence)")
+        # Même cadrage que les modèles de la main : on rogne la face comme `learn_from_strip`.
+        h, w = tile.shape[:2]
+        dy, dx = int(round(h * inset)), int(round(w * inset))
+        tile = tile[dy:h - dy, dx:w - dx]
         self._save(label, cv2.resize(tile, size, interpolation=cv2.INTER_CUBIC), overwrite)
         self.reload()
 
@@ -200,10 +205,11 @@ class TileMatcher:
                 best_label, best_score = label, score
         return best_label, best_score
 
-    def read_tiles(self, image: np.ndarray, threshold: float = 0.6) -> list[Detection]:
+    def read_tiles(self, image: np.ndarray, threshold: float = 0.6,
+                   max_long: float | None = None) -> list[Detection]:
         """Tuiles posées sur le tapis, dans l'ordre de lecture ; les tuiles couchées sont redressées."""
         dets = []
-        for x, y, w, h in tile_boxes(image):
+        for x, y, w, h in tile_boxes(image, max_long=max_long):
             if w > h:  # tuile couchée : on essaie les deux sens de rotation
                 sub = image[y:y + h, x:x + w]
                 options = []
@@ -226,13 +232,27 @@ class TileMatcher:
         return [d.label for d in dets], riichi
 
 
-def tile_boxes(image: np.ndarray, min_area: int = 600) -> list[tuple[int, int, int, int]]:
-    """Faces de tuiles (claires et peu saturées) séparées par le tapis vert."""
+def tile_boxes(image: np.ndarray, min_area: int = 600,
+               max_long: float | None = None) -> list[tuple[int, int, int, int]]:
+    """Faces de tuiles (peu saturées) séparées par le tapis vert.
+
+    Les faces claires sont cherchées d'abord ; les tuiles grisées par le jeu (plus
+    sombres) sont ajoutées ensuite, si elles ne contiennent presque pas de face claire.
+    """
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    mask = ((hsv[:, :, 1] < 70) & (hsv[:, :, 2] > 160)).astype(np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    n, _, stats, _ = cv2.connectedComponentsWithStats(mask)
-    boxes = [tuple(int(v) for v in stats[i][:4]) for i in range(1, n) if stats[i][4] >= min_area]
+    low_sat = hsv[:, :, 1] < 70
+    bright = (low_sat & (hsv[:, :, 2] > 160)).astype(np.uint8)
+    grey = ((hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 25)).astype(np.uint8)
+    boxes = []
+    for mask, greyed in ((bright, False), (grey, True)):
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5) if greyed else (3, 3), np.uint8))
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+        for i in range(1, n):
+            if stats[i][4] < min_area or (greyed and bright[labels == i].mean() > 0.3):
+                continue
+            boxes.append(tuple(int(v) for v in stats[i][:4]))
+    if max_long is not None:  # ex. appels : plus petits que les tuiles de la main
+        boxes = [b for b in boxes if max(b[2], b[3]) <= max_long]
     if not boxes:
         return []
     # On écarte ce qui n'a pas la taille d'une tuile (textes, reflets).

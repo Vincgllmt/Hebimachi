@@ -25,6 +25,7 @@ class Config:
     monitor: int = 1
     hand: Region | None = None
     dora: Region | None = None
+    calls: Region | None = None      # zone de nos appels (chi/pon/kan), en bas à droite
     rivers: dict[str, Region] = field(default_factory=dict)  # me / shimocha / toimen / kamicha
     threshold: float = 0.72
     extra: dict = field(default_factory=dict)
@@ -33,7 +34,7 @@ class Config:
     def load(cls, path: Path) -> "Config":
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
-            for k in ("hand", "dora"):
+            for k in ("hand", "dora", "calls"):
                 if data.get(k):
                     data[k] = tuple(data[k])
             data["rivers"] = {k: tuple(v) for k, v in data.get("rivers", {}).items()}

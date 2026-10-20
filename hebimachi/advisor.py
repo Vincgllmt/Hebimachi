@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from .defense import Opponent, danger_table
 from .efficiency import Analysis, Candidate, analyze
+from .tiles import display_name, to_counts
 
 SAFE_THRESHOLD = 3.0  # % de danger toléré quand on est iishanten face à un riichi
 
@@ -16,10 +17,60 @@ class Advice:
     analysis: Analysis
     ranked: list[Candidate]
     danger: dict[int, tuple[float, str]]  # vide s'il n'y a pas de riichi
+    warning: str = ""
+
+
+def open_yaku(counts: list[int]) -> list[str]:
+    """Yaku courants d'une main ouverte complète (main + appels).
+
+    Volontairement simple : tanyao, yakuhai (tout brelan d'honneur, les vents comptés
+    comme s'ils valaient un yaku), honitsu, chinitsu, toitoi. Sanshoku, ittsu et
+    chanta ne sont pas encore reconnus.
+    """
+    yaku = []
+    tiles = [t for t in range(34) if counts[t]]
+    if all(t < 27 and t % 9 not in (0, 8) for t in tiles):
+        yaku.append("tanyao")
+    if any(counts[t] >= 3 for t in range(27, 34)):
+        yaku.append("yakuhai")
+    suits = {t // 9 for t in tiles if t < 27}
+    if len(suits) == 1:
+        yaku.append("chinitsu" if all(t < 27 for t in tiles) else "honitsu")
+    if all(c in (0, 2, 3, 4) for c in counts) and sum(c == 2 for c in counts) == 1:
+        yaku.append("toitoi")
+    return yaku
+
+
+def yaku_warning(hand: list[int], calls: list[int], best: Candidate) -> str:
+    """Prévient quand une main ouverte en tenpai ne peut gagner sur aucune (ou certaines) attente(s)."""
+    if not calls or best.shanten != 0 or not best.ukeire:
+        return ""
+    counts = to_counts(hand + calls)
+    if best.discard is not None:
+        counts[best.discard] -= 1
+    good, bad = [], []
+    for t in best.ukeire:
+        counts[t] += 1
+        (good if open_yaku(counts) else bad).append(t)
+        counts[t] -= 1
+    if not good:
+        return ("Main ouverte SANS YAKU : vous ne pourrez pas gagner (tenpai formel seulement). "
+                "Cherchez un yaku (tanyao, brelan d'honneur, une seule couleur…) ou défendez.")
+    if bad:
+        return (f"Sans yaku sur {', '.join(display_name(t) for t in bad)} : ne gagnez que sur "
+                f"{', '.join(display_name(t) for t in good)}.")
+    return ""
 
 
 def advise(hand: list[int], visible: list[int], opponents: list[Opponent],
-           melds: int = 0, draws_left: int | None = None) -> Advice:
+           melds: int = 0, draws_left: int | None = None, calls: list[int] | None = None) -> Advice:
+    adv = _advise(hand, visible, opponents, melds, draws_left)
+    adv.warning = yaku_warning(hand, calls or [], adv.ranked[0])
+    return adv
+
+
+def _advise(hand: list[int], visible: list[int], opponents: list[Opponent],
+            melds: int, draws_left: int | None) -> Advice:
     analysis = analyze(hand, visible, melds, draws_left)
     visible_all = [visible[t] + hand.count(t) for t in range(34)]
     threats = [o for o in opponents if o.riichi]
