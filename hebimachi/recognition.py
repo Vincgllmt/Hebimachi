@@ -109,7 +109,7 @@ class TileMatcher:
         return [Detection(x, int(rows[best_label[x]][x]), labels[best_label[x]], float(best_score[x]))
                 for x in sorted(accepted)]
 
-    def detect_multiscale(self, image: np.ndarray, scales=(0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+    def detect_multiscale(self, image: np.ndarray, scales=tuple(s / 100 for s in range(40, 101, 4)),
                           threshold: float = 0.72) -> list[Detection]:
         """Pour les zones où les tuiles sont plus petites (indicateurs dora)."""
         best: list[Detection] = []

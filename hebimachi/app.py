@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from .advisor import Advice, advise
-from .capture import Config, crop, enable_dpi_awareness, grab_screen
+from .capture import Config, crop, enable_dpi_awareness, grab_screen, list_monitors
 from .defense import Opponent
 from .efficiency import estimate_draws_left, simulate_tenpai
 from .recognition import TileMatcher
@@ -183,6 +183,11 @@ class App:
         ttk.Button(bar, text="Ouvrir une image…", command=self.open_image).pack(side="left")
         ttk.Button(bar, text="Écran en direct", command=self.use_live).pack(side="left", padx=4)
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
+        monitors = list_monitors()
+        self.monitor_var = tk.StringVar(value=monitors[min(self.config.monitor, len(monitors)) - 1])
+        box = ttk.Combobox(bar, textvariable=self.monitor_var, values=monitors, state="readonly", width=34)
+        box.pack(side="left", padx=(0, 6))
+        box.bind("<<ComboboxSelected>>", lambda _e: self.set_monitor(box.current() + 1))
         ttk.Button(bar, text="Zones…", command=self.calibrate).pack(side="left")
         ttk.Button(bar, text="Apprendre les tuiles…", command=lambda: LearnDialog(self)).pack(side="left", padx=4)
 
@@ -253,6 +258,16 @@ class App:
     def use_live(self):
         self.loaded_image = None
         self.status("Source : écran en direct.")
+
+    def set_monitor(self, index: int):
+        if index == self.config.monitor:
+            return
+        self.config.monitor = index
+        # Les zones sont relatives à l'écran : elles ne valent plus rien sur un autre écran.
+        self.config.hand = self.config.dora = None
+        self.config.save(CONFIG_PATH)
+        self.last_image = None
+        self.status(f"Écran {index} sélectionné : redéfinissez les zones (« Zones… »).")
 
     def calibrate(self):
         img = self.current_image(force_grab=True)

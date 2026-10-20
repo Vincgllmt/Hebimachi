@@ -1,6 +1,6 @@
 # Hebimachi — assistant probabiliste de Riichi Mahjong
 
-Lit l'écran de **Mahjong Soul**, reconnaît vos tuiles et classe les défausses selon
+Lit l'écran du mahjong de **Like a Dragon: Ishin!** (vue de dessus 2D), reconnaît vos tuiles et classe les défausses selon
 l'efficacité (shanten, ukeire, probabilités) et la défense face aux riichi.
 
 ## Lancer

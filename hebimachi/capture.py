@@ -43,6 +43,13 @@ class Config:
         path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
 
 
+def list_monitors() -> list[str]:
+    """Libellés des écrans physiques (l'index 0 de mss est le bureau virtuel entier)."""
+    with mss.mss() as sct:
+        return [f"Écran {i} — {m['width']}×{m['height']} @ ({m['left']}, {m['top']})"
+                for i, m in enumerate(sct.monitors) if i > 0]
+
+
 def grab_screen(monitor: int = 1) -> np.ndarray:
     """Capture complète d'un écran, en BGR."""
     with mss.mss() as sct:
