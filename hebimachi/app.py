@@ -21,6 +21,13 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 CONFIG_PATH = DATA / "config.json"
 OPPONENTS = ("Shimocha (droite)", "Toimen (face)", "Kamicha (gauche)")
+RIVER_FIELDS = {"me": "mine", "shimocha": "opp0", "toimen": "opp1", "kamicha": "opp2"}
+RIVER_TITLES = {
+    "me": "Zone de VOTRE RIVIÈRE (prévoyez la place de 3 rangées)",
+    "shimocha": "Rivière de SHIMOCHA (joueur de droite)",
+    "toimen": "Rivière de TOIMEN (joueur d'en face)",
+    "kamicha": "Rivière de KAMICHA (joueur de gauche)",
+}
 AUTO_INTERVAL_MS = 1500
 
 
@@ -265,6 +272,7 @@ class App:
         self.config.monitor = index
         # Les zones sont relatives à l'écran : elles ne valent plus rien sur un autre écran.
         self.config.hand = self.config.dora = None
+        self.config.rivers = {}
         self.config.save(CONFIG_PATH)
         self.last_image = None
         self.status(f"Écran {index} sélectionné : redéfinissez les zones (« Zones… »).")
@@ -277,8 +285,14 @@ class App:
             self.root.wait_window(sel)
             if sel.result:
                 setattr(self.config, key, sel.result)
+        for seat, title in RIVER_TITLES.items():
+            sel = RegionSelector(self.root, img, title)
+            self.root.wait_window(sel)
+            if sel.result:
+                self.config.rivers[seat] = sel.result
         self.config.save(CONFIG_PATH)
-        self.status(f"Zones enregistrées : main={self.config.hand} dora={self.config.dora}")
+        self.status(f"Zones enregistrées : main={self.config.hand} dora={self.config.dora} "
+                    f"rivières={', '.join(self.config.rivers) or 'aucune'}")
 
     def capture(self):
         if not self.config.hand:
@@ -290,15 +304,26 @@ class App:
         img = self.current_image(force_grab=True)
         hand_img = crop(img, self.config.hand)
         dets = self.matcher.detect(hand_img, threshold=self.config.threshold) if hand_img is not None else []
-        hand_txt = format_labels([d.label for d in dets])
-        changed = hand_txt != self.vars["hand"].get()
-        self.vars["hand"].set(hand_txt)
+        before = {k: v.get() for k, v in self.vars.items()}
+        self.vars["hand"].set(format_labels([d.label for d in dets]))
         dora_img = crop(img, self.config.dora)
         if dora_img is not None:
-            dora = self.matcher.detect_multiscale(dora_img, threshold=self.config.threshold)
-            self.vars["dora"].set(format_labels([d.label for d in dora]))
+            self.vars["dora"].set(format_labels([d.label for d in self.matcher.read_tiles(dora_img)]))
+        riichi_seen = []
+        for seat, region in self.config.rivers.items():
+            river_img = crop(img, region)
+            if river_img is None:
+                continue
+            labels, riichi = self.matcher.read_river(river_img, seat)
+            self.vars[RIVER_FIELDS[seat]].set(format_labels(labels))
+            if seat != "me":
+                self.riichi[int(RIVER_FIELDS[seat][-1])].set(riichi is not None)
+                if riichi is not None:
+                    riichi_seen.append(seat)
+        changed = before != {k: v.get() for k, v in self.vars.items()}
         low = [d for d in dets if d.score < self.config.threshold + 0.08]
-        self.status(f"{len(dets)} tuiles reconnues" + (f" ({len(low)} incertaines)" if low else ""))
+        self.status(f"{len(dets)} tuiles reconnues en main" + (f" ({len(low)} incertaines)" if low else "")
+                    + (f" — riichi : {', '.join(riichi_seen)}" if riichi_seen else ""))
         if changed or not self.auto.get():
             self.analyze()
 

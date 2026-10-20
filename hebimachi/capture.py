@@ -25,6 +25,7 @@ class Config:
     monitor: int = 1
     hand: Region | None = None
     dora: Region | None = None
+    rivers: dict[str, Region] = field(default_factory=dict)  # me / shimocha / toimen / kamicha
     threshold: float = 0.72
     extra: dict = field(default_factory=dict)
 
@@ -35,6 +36,7 @@ class Config:
             for k in ("hand", "dora"):
                 if data.get(k):
                     data[k] = tuple(data[k])
+            data["rivers"] = {k: tuple(v) for k, v in data.get("rivers", {}).items()}
             return cls(**data)
         return cls()
 

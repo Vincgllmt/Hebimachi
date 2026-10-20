@@ -12,16 +12,18 @@ python -m hebimachi
 
 ## Première utilisation
 
-1. **Zones…** : encadrez la zone de votre main (avec un peu de marge en hauteur),
-   puis celle des indicateurs dora (Échap pour ignorer).
+1. Choisissez l'écran du jeu dans la liste déroulante, puis **Zones…** : encadrez votre
+   main, les indicateurs dora, puis les quatre rivières (Échap pour ignorer une zone).
+   Laissez de la place aux rangées suivantes des rivières.
 2. **Apprendre les tuiles…** : encadrez des tuiles contiguës de votre main, tapez-les
    (`1123m406p77z`, `0` = cinq rouge), enregistrez. Recommencez sur plusieurs mains
    jusqu'à ce que les 37 modèles soient appris. À refaire si la résolution ou la
    taille de la fenêtre du jeu change.
 3. **Capturer** (ou **Auto**, toutes les 1,5 s) : la main est reconnue puis analysée.
 
-Les défausses adverses et les riichi se saisissent pour l'instant à la main ; on peut
-aussi tout saisir sans vision et cliquer sur **Analyser**.
+Les rivières sont lues automatiquement, dans l'ordre des défausses ; une tuile couchée
+coche « Riichi » pour ce joueur. Tous les champs restent modifiables à la main, et l'on
+peut tout saisir sans vision puis cliquer sur **Analyser**.
 
 ## Colonnes
 
