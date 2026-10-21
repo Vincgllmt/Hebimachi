@@ -338,7 +338,8 @@ class PromptReader:
     dans data/templates/prompt_inconnu/ pour pouvoir apprendre ce nouveau mot ensuite.
     """
 
-    def __init__(self, template_dir: Path, threshold: float = 0.8):
+    # Les mots appris matchent à ~1.0 ; « Pon » atteint encore 0.86 sur « Ron » (une lettre d'écart).
+    def __init__(self, template_dir: Path, threshold: float = 0.93):
         self.dir = Path(template_dir)
         self.threshold = threshold
         self._saved = False
@@ -356,12 +357,20 @@ class PromptReader:
     def read(self, region: np.ndarray) -> tuple[bool, list[str]]:
         """(un prompt est-il affiché ?, actions proposées) dans la zone des boutons."""
         gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-        found = []
+        hits: list[Detection] = []
         for word, tpl in self.templates.items():
             if gray.shape[0] < tpl.shape[0] or gray.shape[1] < tpl.shape[1]:
                 continue
-            if cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED).max() >= self.threshold:
-                found.append(word)
+            _, score, _, (x, y) = cv2.minMaxLoc(cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED))
+            if score >= self.threshold:
+                hits.append(Detection(x, y, tpl.shape[1], tpl.shape[0], word, score))
+        # Deux mots au même endroit (mots proches) : seul le meilleur score est le bon.
+        found: list[str] = []
+        kept: list[Detection] = []
+        for d in sorted(hits, key=lambda d: -d.score):
+            if all(_overlap(d, k) < 0.5 for k in kept):
+                kept.append(d)
+                found.append(d.label)
         actions = [w for w in PROMPT_ACTIONS if w in found]
         shown = bool(actions) or "Annuler" in found
         if shown and not actions and not self._saved:
