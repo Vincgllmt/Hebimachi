@@ -345,9 +345,9 @@ PROMPT_ACTIONS = ("Chi", "Pon", "Kan", "Ron", "Riichi", "Tsumo")
 class PromptReader:
     """Reconnaît les mots des boutons d'action affichés par le jeu.
 
-    Chaque mot appris est un modèle en niveaux de gris (data/templates/prompt_<Mot>.png).
+    Chaque mot appris est un modèle en niveaux de gris (data/games/<jeu>/templates/prompt_<Mot>.png).
     Si un bouton est affiché (« Annuler » visible) sans mot connu, la zone est enregistrée
-    dans data/templates/prompt_inconnu/ pour pouvoir apprendre ce nouveau mot ensuite.
+    dans templates/prompt_inconnu/ (dossier du jeu) pour pouvoir apprendre ce nouveau mot ensuite.
     """
 
     # Les mots appris matchent à ~1.0 ; « Pon » atteint encore 0.86 sur « Ron » (une lettre d'écart).

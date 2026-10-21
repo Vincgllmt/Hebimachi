@@ -15,13 +15,11 @@ from .advisor import Advice, advise
 from .capture import Config, calls_region, crop, enable_dpi_awareness, grab_screen, list_monitors
 from .defense import Opponent
 from .efficiency import estimate_draws_left, simulate_tenpai
+from .games import Game, last_game_id, list_games, save_last_game
 from .recognition import PromptReader, TileMatcher, WindReader, group_calls
 from .tiles import display_name, format_labels, label_to_index, parse, parse_labels, to_counts
 from .yaku import Context
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data"
-CONFIG_PATH = DATA / "config.json"
 OPPONENTS = ("Shimocha (droite)", "Toimen (face)", "Kamicha (gauche)")
 WIND_NAMES = ["Est", "Sud", "Ouest", "Nord"]
 SEAT_NAMES = {"shimocha": "Shimocha", "toimen": "Toimen", "kamicha": "Kamicha"}
@@ -180,26 +178,50 @@ class App:
         self.root = root
         root.title("Hebimachi — assistant Riichi Mahjong")
         root.geometry("1180x760")
-        self.config = Config.load(CONFIG_PATH)
-        self.matcher = TileMatcher(DATA / "templates")
+        self.games = list_games()
+        last = last_game_id()
         self.loaded_image: np.ndarray | None = None
         self.last_image: np.ndarray | None = None
-        self.winds = WindReader(DATA / "templates")
-        self.prompts = PromptReader(DATA / "templates")
-        self.prompt: list[str] = []      # actions proposées par le jeu en ce moment
-        self.prompt_shown = False
-        self.prev_rivers: dict[str, list[str]] = {}
         self.auto = tk.BooleanVar(value=False)
         self.generation = 0
+        self._load_game(next((g for g in self.games if g.id == last), self.games[0]))
         self._build()
         if not self.config.hand:
             self.status("Première utilisation : « Zones… » puis « Apprendre les tuiles… ». "
                         "Vous pouvez aussi saisir la main à la main et cliquer sur Analyser.")
 
+    def _load_game(self, game: Game):
+        """Zones, modèles et particularités du jeu choisi."""
+        self.game = game
+        self.root.title(f"Hebimachi — assistant Riichi Mahjong — {game.name}")
+        self.config = Config.load(game.config_path)
+        self.matcher = TileMatcher(game.templates)
+        self.winds = WindReader(game.templates)
+        self.prompts = PromptReader(game.templates)
+        self.prompt: list[str] = []      # actions proposées par le jeu en ce moment
+        self.prompt_shown = False
+        self.prev_rivers: dict[str, list[str]] = {}
+
+    def set_game(self, game: Game):
+        if game.id == self.game.id:
+            return
+        self._load_game(game)
+        save_last_game(game.id)
+        monitors = list_monitors()
+        self.monitor_var.set(monitors[min(self.config.monitor, len(monitors)) - 1])
+        self.last_image = None
+        self.status(f"Jeu : {game.name}"
+                    + ("" if self.config.hand else " — zones à définir (« Zones… »)."))
+
     # ---------- construction de l'interface ----------
     def _build(self):
         bar = ttk.Frame(self.root, padding=6)
         bar.pack(fill="x")
+        self.game_var = tk.StringVar(value=self.game.name)
+        game_box = ttk.Combobox(bar, textvariable=self.game_var, values=[g.name for g in self.games],
+                                state="readonly", width=24)
+        game_box.pack(side="left", padx=(0, 6))
+        game_box.bind("<<ComboboxSelected>>", lambda _e: self.set_game(self.games[game_box.current()]))
         ttk.Button(bar, text="📷 Capturer", command=self.capture).pack(side="left")
         ttk.Checkbutton(bar, text="Auto", variable=self.auto, command=self._auto_loop).pack(side="left", padx=6)
         ttk.Button(bar, text="Ouvrir une image…", command=self.open_image).pack(side="left")
@@ -322,7 +344,7 @@ class App:
         # Les zones sont relatives à l'écran : elles ne valent plus rien sur un autre écran.
         self.config.hand = self.config.dora = self.config.calls = None
         self.config.rivers = {}
-        self.config.save(CONFIG_PATH)
+        self.config.save(self.game.config_path)
         self.last_image = None
         self.status(f"Écran {index} sélectionné : redéfinissez les zones (« Zones… »).")
 
@@ -340,7 +362,7 @@ class App:
             self.root.wait_window(sel)
             if sel.result:
                 self.config.rivers[seat] = sel.result
-        self.config.save(CONFIG_PATH)
+        self.config.save(self.game.config_path)
         self.status(f"Zones enregistrées : main={self.config.hand} dora={self.config.dora} "
                     f"rivières={', '.join(self.config.rivers) or 'aucune'}")
 
@@ -581,7 +603,7 @@ class App:
         riichi = actions.get("riichi")
         if riichi is not None and riichi.recommend:
             return (f"Jetez {display_name(riichi.discard)} et déclarez RIICHI",
-                    riichi.reason + " Le bouton Riichi est caché : appuyez sur Carré pour l'afficher."
+                    riichi.reason + (f" {self.game.riichi_hint}" if self.game.riichi_hint else "")
                     + self._kan_note(actions))
         if best.shanten == 0:
             title = f"Jetez {name}  →  TENPAI"
