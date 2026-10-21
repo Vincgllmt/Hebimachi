@@ -10,17 +10,21 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
+from .actions import check_calls, check_closed_kan, check_riichi, check_ron, check_tsumo, evaluate_prompt
 from .advisor import Advice, advise
 from .capture import Config, crop, enable_dpi_awareness, grab_screen, list_monitors
 from .defense import Opponent
 from .efficiency import estimate_draws_left, simulate_tenpai
-from .recognition import TileMatcher
+from .recognition import PromptReader, TileMatcher, WindReader
 from .tiles import display_name, format_labels, label_to_index, parse, parse_labels, to_counts
+from .yaku import Context
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 CONFIG_PATH = DATA / "config.json"
 OPPONENTS = ("Shimocha (droite)", "Toimen (face)", "Kamicha (gauche)")
+WIND_NAMES = ["Est", "Sud", "Ouest", "Nord"]
+SEAT_NAMES = {"shimocha": "Shimocha", "toimen": "Toimen", "kamicha": "Kamicha"}
 RIVER_FIELDS = {"me": "mine", "shimocha": "opp0", "toimen": "opp1", "kamicha": "opp2"}
 RIVER_TITLES = {
     "me": "Zone de VOTRE RIVIÈRE (prévoyez la place de 3 rangées)",
@@ -31,8 +35,10 @@ RIVER_TITLES = {
 AUTO_INTERVAL_MS = 1500
 HAND_THRESHOLD = 0.78   # sous ce score, l'écran est sans doute flou (menu pause) ou masqué
 PANEL_BG = "#1f4d36"
+PROMPT_BG = "#8a4a10"  # bandeau orange quand le jeu affiche un prompt d'action
 HAND_TILE_W, HAND_TILE_H = 54, 74
 CHOICE_COLORS = ("#ff3b3b", "#ffb020", "#ffe066")  # 1er, 2e, 3e choix
+CALL_COLOR = "#3ddc84"  # tuiles à utiliser pour un appel
 
 
 def to_photo(img_bgr: np.ndarray, scale: float = 1.0) -> ImageTk.PhotoImage:
@@ -178,6 +184,11 @@ class App:
         self.matcher = TileMatcher(DATA / "templates")
         self.loaded_image: np.ndarray | None = None
         self.last_image: np.ndarray | None = None
+        self.winds = WindReader(DATA / "templates")
+        self.prompts = PromptReader(DATA / "templates")
+        self.prompt: list[str] = []      # actions proposées par le jeu en ce moment
+        self.prompt_shown = False
+        self.prev_rivers: dict[str, list[str]] = {}
         self.auto = tk.BooleanVar(value=False)
         self.generation = 0
         self._build()
@@ -206,13 +217,16 @@ class App:
         panel = tk.Frame(self.root, bg=PANEL_BG, padx=12, pady=8)
         panel.pack(fill="x", padx=6, pady=(0, 6))
         self.advice_var = tk.StringVar(value="En attente d'une main…")
-        tk.Label(panel, textvariable=self.advice_var, bg=PANEL_BG, fg="white",
-                 font=("Segoe UI", 22, "bold"), anchor="w").pack(fill="x")
+        title = tk.Label(panel, textvariable=self.advice_var, bg=PANEL_BG, fg="white",
+                         font=("Segoe UI", 22, "bold"), anchor="w")
+        title.pack(fill="x")
         self.advice_detail = tk.StringVar()
-        tk.Label(panel, textvariable=self.advice_detail, bg=PANEL_BG, fg="#cfe8d6",
-                 font=("Segoe UI", 12), anchor="w", justify="left", wraplength=1120).pack(fill="x")
+        detail = tk.Label(panel, textvariable=self.advice_detail, bg=PANEL_BG, fg="#cfe8d6",
+                          font=("Segoe UI", 12), anchor="w", justify="left", wraplength=1120)
+        detail.pack(fill="x")
         self.hand_canvas = tk.Canvas(panel, height=HAND_TILE_H + 34, bg=PANEL_BG, highlightthickness=0)
         self.hand_canvas.pack(fill="x", pady=(6, 0))
+        self.panel_widgets = [panel, title, detail, self.hand_canvas]
         self.tile_photos: list[ImageTk.PhotoImage] = []
 
         form = ttk.LabelFrame(self.root, text="Situation (corrigez au besoin — notation 123m406p77z)", padding=8)
@@ -239,6 +253,24 @@ class App:
             self.riichi.append(v)
         field(5, "Autres tuiles visibles (appels adverses…)", "other")
         ttk.Button(form, text="Analyser", command=self.analyze).grid(row=5, column=3, sticky="e")
+
+        # Tuile que l'on peut appeler (pon/chi/kan/ron), et contexte des vents.
+        field(6, "Dernière défausse adverse (appel/ron)", "offer", 10)
+        extra = ttk.Frame(form)
+        extra.grid(row=6, column=2, columnspan=2, sticky="w")
+        self.offer_from = tk.StringVar(value=OPPONENTS[0].split()[0])
+        self.seat_var = tk.StringVar(value="Sud")
+        self.round_var = tk.StringVar(value="Est")
+        self.my_riichi = tk.BooleanVar()
+        for label, var, values in (("jetée par", self.offer_from, [o.split()[0] for o in OPPONENTS]),
+                                   ("Mon vent", self.seat_var, WIND_NAMES),
+                                   ("Vent de table", self.round_var, WIND_NAMES)):
+            ttk.Label(extra, text=label).pack(side="left", padx=(8, 2))
+            cb = ttk.Combobox(extra, textvariable=var, values=values, state="readonly", width=9)
+            cb.pack(side="left")
+            cb.bind("<<ComboboxSelected>>", lambda _e: self.analyze())
+        ttk.Checkbutton(extra, text="Je suis en riichi", variable=self.my_riichi,
+                        command=self.analyze).pack(side="left", padx=8)
         form.columnconfigure(1, weight=1)
         form.columnconfigure(3, weight=1)
 
@@ -351,22 +383,56 @@ class App:
         if dora_img is not None:
             self.vars["dora"].set(format_labels([d.label for d in self.matcher.read_tiles(dora_img)]))
         riichi_seen = []
+        rivers: dict[str, list[str]] = {}
         for seat, region in self.config.rivers.items():
             river_img = crop(img, region)
             if river_img is None:
                 continue
             labels, riichi = self.matcher.read_river(river_img, seat)
+            rivers[seat] = labels
             self.vars[RIVER_FIELDS[seat]].set(format_labels(labels))
-            if seat != "me":
+            if seat == "me":
+                self.my_riichi.set(riichi is not None)
+            else:
                 self.riichi[int(RIVER_FIELDS[seat][-1])].set(riichi is not None)
                 if riichi is not None:
                     riichi_seen.append(seat)
-        changed = before != {k: v.get() for k, v in self.vars.items()}
+        self._update_offer(rivers, len(dets) + 3 * melds)
+        self._read_winds(img)
+        prompt_before = (self.prompt_shown, self.prompt)
+        prompt_region = crop(img, self.config.extra.get("prompt"))
+        self.prompt_shown, self.prompt = (self.prompts.read(prompt_region) if prompt_region is not None
+                                          else (False, []))
+        changed = (before != {k: v.get() for k, v in self.vars.items()}
+                   or (self.prompt_shown, self.prompt) != prompt_before)
         low = [d for d in dets if d.score < self.config.threshold + 0.08]
         self.status(f"{len(dets)} tuiles reconnues en main" + (f" ({len(low)} incertaines)" if low else "")
                     + (f" — riichi : {', '.join(riichi_seen)}" if riichi_seen else ""))
         if changed or not self.auto.get():
             self.analyze()
+
+    def _update_offer(self, rivers: dict[str, list[str]], hand_size: int):
+        """Repère la tuile qu'un adversaire vient de jeter : c'est elle que l'on peut appeler."""
+        if hand_size == 14:  # notre tour : plus rien à appeler
+            self.vars["offer"].set("")
+        else:
+            grown = [s for s in ("shimocha", "toimen", "kamicha")
+                     if s in rivers and s in self.prev_rivers
+                     and len(rivers[s]) == len(self.prev_rivers[s]) + 1]
+            if len(grown) == 1:
+                seat = grown[0]
+                self.vars["offer"].set(rivers[seat][-1])
+                self.offer_from.set(SEAT_NAMES[seat])
+        self.prev_rivers = rivers
+
+    def _read_winds(self, img: np.ndarray):
+        seat_region, round_region = self.config.extra.get("seat"), self.config.extra.get("round")
+        seat = self.winds.read_seat(crop(img, seat_region)) if seat_region else None
+        rnd = self.winds.read_round(crop(img, round_region)) if round_region else None
+        if seat is not None:
+            self.seat_var.set(WIND_NAMES[seat - 27])
+        if rnd is not None:
+            self.round_var.set(WIND_NAMES[rnd - 27])
 
     def _auto_loop(self):
         if self.auto.get():
@@ -393,23 +459,111 @@ class App:
             visible_tiles += [t for o in opponents for t in o.discards]
             visible = to_counts(visible_tiles)
             total_discards = len(mine) + sum(len(o.discards) for o in opponents)
-            adv = advise(hand, visible, opponents, melds, estimate_draws_left(total_discards), calls)
+            draws_left = estimate_draws_left(total_discards)
+            adv = advise(hand, visible, opponents, melds, draws_left, calls)
+            ctx = Context(27 + WIND_NAMES.index(self.round_var.get()), 27 + WIND_NAMES.index(self.seat_var.get()),
+                          self.my_riichi.get(), calls=[parse(g) for g in calls_groups])
+            actions = self._actions(hand, ctx, visible, mine, draws_left, sum(o.riichi for o in opponents), adv)
         except ValueError as exc:
             self.summary.set(f"Erreur : {exc}")
             self.advice_var.set("Main à vérifier")
             self.advice_detail.set(f"{exc}. Corrigez le champ « Main » (13 ou 14 tuiles, appels compris).")
             return
-        self._show(adv, melds)
+        self._show(adv, melds, actions)
+
+    def _actions(self, hand, ctx: Context, visible, mine, draws_left, threats, adv: Advice) -> dict:
+        """Ron/appels sur la défausse adverse (13 tuiles), ou tsumo/kan/riichi à notre tour (14)."""
+        out: dict = {}
+        if (len(hand) + 3 * len(ctx.calls)) % 3 == 1:
+            words = [w for w in self.prompt if w in ("Ron", "Pon", "Chi", "Kan")]
+            if words:
+                out["prompt"] = {w: evaluate_prompt(hand, w, ctx, visible, draws_left, threats, mine)
+                                 for w in words}
+                return out
+            offer = parse(self.vars["offer"].get())
+            if offer:
+                tile = offer[-1]
+                out["offer"] = tile
+                out["ron"] = check_ron(hand, tile, ctx, mine)
+                out["calls"] = check_calls(hand, tile, self.offer_from.get() == SEAT_NAMES["kamicha"],
+                                           ctx, visible, draws_left, threats)
+            return out
+        drawn = label_to_index(parse_labels(self.vars["hand"].get())[-1])
+        out["drawn"] = drawn
+        out["tsumo"] = check_tsumo(hand, drawn, ctx)
+        out["kan"] = check_closed_kan(hand, ctx, threats)
+        if adv.mode != "Défense":
+            out["riichi"] = check_riichi(hand, visible, ctx, draws_left, threats)
+        return out
 
     # ---------- affichage du conseil ----------
-    def _advice_text(self, adv: Advice) -> tuple[str, str]:
+    def _action_text(self, adv: Advice, actions: dict) -> tuple[str, str] | None:
+        """Réponse au prompt du jeu (ron, tsumo, pon, chi, kan, riichi), prioritaire sur la défausse."""
+        tsumo = actions.get("tsumo")
+        if tsumo is not None:
+            return ("TSUMO !", tsumo.reason) if tsumo.recommend else None
+        if "prompt" in actions:
+            return self._prompt_text(actions["prompt"])
+        if "offer" in actions:
+            tile = actions["offer"]
+            ron = actions.get("ron")
+            if ron is not None and ron.recommend:
+                return f"RON sur {display_name(tile)} !", ron.reason
+            calls = actions.get("calls", [])
+            notes = [f"{d.action} : {d.reason}" for d in calls]
+            if ron is not None:
+                notes.insert(0, f"RON : {ron.reason}")
+            yes = [d for d in calls if d.recommend]
+            if yes:
+                d = yes[0]
+                used = " + ".join(display_name(t) for t in d.used)
+                return f"{d.action} {display_name(tile)}  →  OUI", f"Avec {used}. {d.reason}"
+            if notes:
+                return f"Passez : n'appelez pas {display_name(tile)}", "\n".join(notes)
+        return None
+
+    @staticmethod
+    def _prompt_text(prompt: dict[str, list]) -> tuple[str, str]:
+        """Prompt Ron/Pon/Chi/Kan : la tuile jetée n'est pas encore visible, on répond pour chaque cas."""
+        lines, titles = [], []
+        for word in ("Ron", "Pon", "Kan", "Chi"):
+            if word not in prompt:
+                continue
+            results = prompt[word]
+            yes = [t for t, d in results if d.recommend]
+            if not results:
+                titles.append(f"{word.upper()} ?")
+            elif len(yes) == len(results):
+                titles.append(f"{word.upper()} → OUI")
+            elif not yes:
+                titles.append(f"{word.upper()} → NON")
+            else:
+                titles.append(f"{word.upper()} : OUI si {', '.join(display_name(t) for t in yes)}")
+            for t, d in results:
+                used = f" (avec {' + '.join(display_name(u) for u in d.used)})" if d.used else ""
+                lines.append(f"{'✔' if d.recommend else '✘'} {display_name(t)}{used} : {d.reason}")
+        return "  •  ".join(titles), "\n".join(lines[:8])
+
+    def _advice_text(self, adv: Advice, actions: dict | None = None) -> tuple[str, str]:
         a, best = adv.analysis, adv.ranked[0]
+        actions = actions or {}
 
         def tiles_list(c) -> str:
             return ", ".join(display_name(t) for t in sorted(c.ukeire))
 
+        action = self._action_text(adv, actions)
+        if action:
+            return action
+        tsumo = actions.get("tsumo")
         if a.shanten == -1:
-            return "TSUMO ! Main complète", "Déclarez la victoire (si vous avez un yaku)."
+            reason = tsumo.reason if tsumo else "Déclarez la victoire (si vous avez un yaku)."
+            return ("Main complète, mais pas de tsumo possible" if tsumo else "TSUMO ! Main complète"), reason
+        if self.my_riichi.get() and "drawn" in actions:
+            kan = actions.get("kan")
+            detail = "Vous êtes en riichi : la main ne peut plus changer."
+            if kan:
+                detail += f" KAN fermé : {'OUI' if kan.recommend else 'NON'}. {kan.reason}"
+            return f"Riichi : jetez la tuile piochée ({display_name(actions['drawn'])})", detail
         if best.discard is None:  # 13 tuiles : ce n'est pas à nous de jeter
             if best.shanten == 0:
                 return "Tenpai — en attente", f"Attente : {tiles_list(best)} ({best.total} tuiles restantes)."
@@ -417,11 +571,15 @@ class App:
 
         name = display_name(best.discard)
         danger = adv.danger.get(best.discard, (None, ""))[0]
+        riichi = actions.get("riichi")
+        if riichi is not None and riichi.recommend:
+            return (f"Jetez {display_name(riichi.discard)} et déclarez RIICHI",
+                    riichi.reason + self._kan_note(actions))
         if best.shanten == 0:
             title = f"Jetez {name}  →  TENPAI"
             detail = f"Attente : {tiles_list(best)} ({best.total} tuiles restantes)."
-            if a.shanten == 0 and not adv.danger:
-                detail += " Déclarez riichi si votre main est fermée et sans yaku."
+            if riichi is not None:
+                detail += f" Pas de riichi (dama) : {riichi.reason}"
         else:
             title = f"Jetez {name}"
             detail = (f"Vous restez à {best.shanten}-shanten avec {best.total} tuiles utiles "
@@ -436,10 +594,42 @@ class App:
             detail += f"  Autres bons choix : {', '.join(others)}."
         if adv.warning:
             detail = f"⚠ {adv.warning}\n{detail}"
-        return title, detail
+        return title, detail + self._kan_note(actions)
 
-    def _draw_hand(self, adv: Advice):
-        """Main en images, le 1er choix encadré en rouge (puis orange, jaune)."""
+    @staticmethod
+    def _kan_note(actions: dict) -> str:
+        kan = actions.get("kan")
+        if kan is None:
+            return ""
+        return f"\nKAN fermé possible : {'OUI' if kan.recommend else 'NON'} — {kan.reason}"
+
+    def _hand_marks(self, labels: list[str], adv: Advice, actions: dict) -> dict[int, tuple[str, int, str]]:
+        """Position dans la main -> (couleur, épaisseur, légende) des tuiles à mettre en avant."""
+        marks: dict[int, tuple[str, int, str]] = {}
+
+        def mark(tile: int, style: tuple[str, int, str], prefer_last: bool = True) -> None:
+            pos = [i for i, lb in enumerate(labels) if label_to_index(lb) == tile and i not in marks]
+            if pos:
+                # On garde les cinq rouges, et on préfère jeter la tuile piochée (la dernière).
+                plain = [i for i in pos if labels[i][0] != "0"] or pos
+                marks[plain[-1] if prefer_last else plain[0]] = style
+
+        call = next((d for d in actions.get("calls", []) if d.recommend), None)
+        riichi = actions.get("riichi")
+        if call is not None:
+            for t in call.used:
+                mark(t, (CALL_COLOR, 5, "APPEL"), prefer_last=False)
+        elif self.my_riichi.get() and "drawn" in actions:
+            marks[len(labels) - 1] = (CHOICE_COLORS[0], 5, "▲ JETER")
+        elif riichi is not None and riichi.recommend:
+            mark(riichi.discard, (CHOICE_COLORS[0], 5, "▲ RIICHI"))
+        else:
+            for rank, c in enumerate(c for c in adv.ranked[:3] if c.discard is not None):
+                mark(c.discard, (CHOICE_COLORS[rank], 5 if rank == 0 else 3, "▲ JETER" if rank == 0 else ""))
+        return marks
+
+    def _draw_hand(self, adv: Advice, actions: dict | None = None):
+        """Main en images : tuile à jeter en rouge (puis orange, jaune), tuiles d'un appel en vert."""
         cv = self.hand_canvas
         cv.delete("all")
         self.tile_photos = []
@@ -447,21 +637,14 @@ class App:
             labels = parse_labels(self.vars["hand"].get())
         except ValueError:
             return
-        choices = [c.discard for c in adv.ranked[:3] if c.discard is not None]
-        marked = {}  # position dans la main -> rang du choix
-        for rank, tile in enumerate(choices):
-            pos = [i for i, lb in enumerate(labels) if label_to_index(lb) == tile and i not in marked]
-            if pos:
-                # On garde les cinq rouges, et on préfère jeter la tuile piochée (la dernière).
-                plain = [i for i in pos if labels[i][0] != "0"] or pos
-                marked[plain[-1]] = rank
+        marks = self._hand_marks(labels, adv, actions or {})
         x = 4
         for i, lb in enumerate(labels):
             if i == len(labels) - 1 and len(labels) % 3 == 2:
                 x += 14  # écart de la tuile piochée, comme dans le jeu
             y = 18
-            if i in marked:
-                y = 6 if marked[i] == 0 else 12  # le meilleur choix « sort » de la main
+            if i in marks:
+                y = 6 if marks[i][1] == 5 else 12  # le meilleur choix « sort » de la main
             tpl = self.matcher.templates.get(lb)
             if tpl is not None:
                 photo = to_photo(cv2.resize(tpl, (HAND_TILE_W, HAND_TILE_H), interpolation=cv2.INTER_AREA))
@@ -470,22 +653,26 @@ class App:
             else:
                 cv.create_rectangle(x, y, x + HAND_TILE_W, y + HAND_TILE_H, fill="#f4f0e6")
                 cv.create_text(x + HAND_TILE_W / 2, y + HAND_TILE_H / 2, text=lb, font=("Segoe UI", 14, "bold"))
-            if i in marked:
-                r = marked[i]
-                width = 5 if r == 0 else 3
+            if i in marks:
+                color, width, caption = marks[i]
                 cv.create_rectangle(x - 3, y - 3, x + HAND_TILE_W + 3, y + HAND_TILE_H + 3,
-                                    outline=CHOICE_COLORS[r], width=width)
-                if r == 0:
-                    cv.create_text(x + HAND_TILE_W / 2, y + HAND_TILE_H + 12, text="▲ JETER",
-                                   fill=CHOICE_COLORS[0], font=("Segoe UI", 10, "bold"))
+                                    outline=color, width=width)
+                if caption:
+                    cv.create_text(x + HAND_TILE_W / 2, y + HAND_TILE_H + 12, text=caption,
+                                   fill=color, font=("Segoe UI", 10, "bold"))
             x += HAND_TILE_W + 4
 
-    def _show(self, adv: Advice, melds: int):
+    def _show(self, adv: Advice, melds: int, actions: dict | None = None):
         a = adv.analysis
-        title, detail = self._advice_text(adv)
+        title, detail = self._advice_text(adv, actions)
+        bg = PROMPT_BG if self.prompt_shown else PANEL_BG
+        for w in self.panel_widgets:
+            w.configure(bg=bg)
+        if self.prompt_shown:
+            title = f"⚡ {title}"
         self.advice_var.set(title)
         self.advice_detail.set(detail)
-        self._draw_hand(adv)
+        self._draw_hand(adv, actions)
         state = {-1: "Main complète (agari) !", 0: "Tenpai"}.get(a.shanten, f"{a.shanten}-shanten")
         self.summary.set(f"{state}   •   Mode : {adv.mode}   •   Tuiles invisibles : {a.unseen}"
                          f"   •   Pioches restantes estimées : {a.draws_left}")
@@ -516,7 +703,10 @@ class App:
                 if c.discard is not None:
                     counts[c.discard] -= 1
                 p = simulate_tenpai(counts, melds, a.remaining, a.draws_left, n_sims=300)
-                self.root.after(0, self._set_mc, gen, iid, p)
+                try:
+                    self.root.after(0, self._set_mc, gen, iid, p)
+                except RuntimeError:  # fenêtre fermée entre-temps
+                    return
 
         if todo:
             threading.Thread(target=work, daemon=True).start()

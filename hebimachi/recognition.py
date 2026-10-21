@@ -260,3 +260,114 @@ def tile_boxes(image: np.ndarray, min_area: int = 600,
     return [b for b in boxes
             if 0.75 * long_side <= max(b[2], b[3]) <= 1.3 * long_side
             and 1.15 <= max(b[2], b[3]) / min(b[2], b[3]) <= 1.8]
+
+
+# ---------- vents : lettre de notre siège, manche en cours ----------
+SEAT_LETTERS = {"E": 27, "S": 28, "O": 29, "N": 30}  # « O » = Ouest dans la version française
+
+
+def letter_mask(image: np.ndarray, size=(32, 40)) -> np.ndarray | None:
+    """Silhouette de la lettre beige d'un panneau de joueur, normalisée."""
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    mask = ((hsv[:, :, 0] >= 8) & (hsv[:, :, 0] <= 35) & (hsv[:, :, 1] < 120)
+            & (hsv[:, :, 2] > 170)).astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+    if n < 2:
+        return None
+    i = 1 + int(np.argmax(stats[1:, 4]))
+    x, y, w, h = stats[i][:4]
+    if h < 15:
+        return None
+    return cv2.resize((labels[y:y + h, x:x + w] == i).astype(np.uint8) * 255, size,
+                      interpolation=cv2.INTER_AREA)
+
+
+class WindReader:
+    """Lit notre vent de siège (lettre du panneau) et la manche (« Est » ou non)."""
+
+    def __init__(self, template_dir: Path):
+        self.dir = Path(template_dir)
+
+    def _load(self, name: str) -> np.ndarray | None:
+        p = self.dir / f"{name}.png"
+        return cv2.imdecode(np.fromfile(p, np.uint8), cv2.IMREAD_GRAYSCALE) if p.exists() else None
+
+    def learn_seat(self, panel: np.ndarray, letter: str) -> None:
+        m = letter_mask(panel)
+        if m is None:
+            raise ValueError("Lettre introuvable dans la zone")
+        cv2.imencode(".png", m)[1].tofile(self.dir / f"seat_{letter}.png")
+
+    def learn_round(self, text: np.ndarray) -> None:
+        cv2.imencode(".png", cv2.cvtColor(text, cv2.COLOR_BGR2GRAY))[1].tofile(self.dir / "round_E.png")
+
+    def read_seat(self, panel: np.ndarray) -> int | None:
+        m = letter_mask(panel)
+        if m is None:
+            return None
+        scores = {}
+        for letter, wind in SEAT_LETTERS.items():
+            tpl = self._load(f"seat_{letter}")
+            if tpl is not None:
+                scores[wind] = float(cv2.matchTemplate(m, tpl, cv2.TM_CCOEFF_NORMED).max())
+        if not scores:
+            return None
+        wind, score = max(scores.items(), key=lambda kv: kv[1])
+        return wind if score > 0.6 else None
+
+    def read_round(self, region: np.ndarray) -> int | None:
+        """27 (Est) si le mot « Est » est trouvé, sinon 28 (Sud) ; None sans modèle."""
+        tpl = self._load("round_E")
+        if tpl is None:
+            return None
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+        if gray.shape[0] < tpl.shape[0] or gray.shape[1] < tpl.shape[1]:
+            return None
+        return 27 if cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED).max() > 0.75 else 28
+
+
+# ---------- prompt du jeu (boutons Chi / Pon / Kan / Ron / Riichi / Tsumo / Annuler) ----------
+PROMPT_ACTIONS = ("Chi", "Pon", "Kan", "Ron", "Riichi", "Tsumo")
+
+
+class PromptReader:
+    """Reconnaît les mots des boutons d'action affichés par le jeu.
+
+    Chaque mot appris est un modèle en niveaux de gris (data/templates/prompt_<Mot>.png).
+    Si un bouton est affiché (« Annuler » visible) sans mot connu, la zone est enregistrée
+    dans data/templates/prompt_inconnu/ pour pouvoir apprendre ce nouveau mot ensuite.
+    """
+
+    def __init__(self, template_dir: Path, threshold: float = 0.8):
+        self.dir = Path(template_dir)
+        self.threshold = threshold
+        self._saved = False
+        self.templates: dict[str, np.ndarray] = {}
+        for p in self.dir.glob("prompt_*.png"):
+            img = cv2.imdecode(np.fromfile(p, np.uint8), cv2.IMREAD_GRAYSCALE)
+            if img is not None:
+                self.templates[p.stem.removeprefix("prompt_")] = img
+
+    def learn(self, word_img: np.ndarray, word: str) -> None:
+        gray = cv2.cvtColor(word_img, cv2.COLOR_BGR2GRAY)
+        cv2.imencode(".png", gray)[1].tofile(self.dir / f"prompt_{word}.png")
+        self.templates[word] = gray
+
+    def read(self, region: np.ndarray) -> tuple[bool, list[str]]:
+        """(un prompt est-il affiché ?, actions proposées) dans la zone des boutons."""
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+        found = []
+        for word, tpl in self.templates.items():
+            if gray.shape[0] < tpl.shape[0] or gray.shape[1] < tpl.shape[1]:
+                continue
+            if cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED).max() >= self.threshold:
+                found.append(word)
+        actions = [w for w in PROMPT_ACTIONS if w in found]
+        shown = bool(actions) or "Annuler" in found
+        if shown and not actions and not self._saved:
+            # Une seule image par apparition du prompt, pas une à chaque capture.
+            unknown = self.dir / "prompt_inconnu"
+            unknown.mkdir(exist_ok=True)
+            cv2.imencode(".png", region)[1].tofile(unknown / f"{len(list(unknown.glob('*.png'))):03d}.png")
+        self._saved = shown and not actions
+        return shown, actions
