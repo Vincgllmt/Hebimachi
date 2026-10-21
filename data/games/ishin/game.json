@@ -1,0 +1,9 @@
+{
+  "name": "Like a Dragon: Ishin!",
+  "riichi_hint": "Le bouton Riichi est caché : appuyez sur Carré pour l'afficher.",
+  "notes": [
+    "Riichi : plus de 4 tuiles au mur et au moins 1 000 points ; le bouton n'apparaît qu'après Carré en début de tour.",
+    "Interface en français : le vent Ouest est noté « O » sur les panneaux des joueurs.",
+    "Boutons d'action : Chi, Pon, Kan, Ron, Riichi appris ; Tsumo pas encore."
+  ]
+}
