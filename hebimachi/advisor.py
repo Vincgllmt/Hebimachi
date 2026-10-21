@@ -8,6 +8,9 @@ from .efficiency import Analysis, Candidate, analyze
 from .tiles import display_name, to_counts
 
 SAFE_THRESHOLD = 3.0  # % de danger toléré quand on est iishanten face à un riichi
+# Un honneur qui donne un yaku (dragon, vent de table ou de siège) « vaut » quelques tuiles
+# utiles : à efficacité presque égale, on jette d'abord les vents sans valeur.
+VALUE_HONOR_BONUS = 2
 
 
 @dataclass
@@ -63,18 +66,20 @@ def yaku_warning(hand: list[int], calls: list[int], best: Candidate) -> str:
 
 
 def advise(hand: list[int], visible: list[int], opponents: list[Opponent],
-           melds: int = 0, draws_left: int | None = None, calls: list[int] | None = None) -> Advice:
-    adv = _advise(hand, visible, opponents, melds, draws_left)
+           melds: int = 0, draws_left: int | None = None, calls: list[int] | None = None,
+           value_honors: set[int] = frozenset()) -> Advice:
+    adv = _advise(hand, visible, opponents, melds, draws_left, value_honors)
     adv.warning = yaku_warning(hand, calls or [], adv.ranked[0])
     return adv
 
 
 def _advise(hand: list[int], visible: list[int], opponents: list[Opponent],
-            melds: int, draws_left: int | None) -> Advice:
+            melds: int, draws_left: int | None, value_honors: set[int]) -> Advice:
     analysis = analyze(hand, visible, melds, draws_left)
     visible_all = [visible[t] + hand.count(t) for t in range(34)]
     threats = [o for o in opponents if o.riichi]
-    cands = analysis.candidates
+    cands = sorted(analysis.candidates,
+                   key=lambda c: (c.shanten, -c.total + VALUE_HONOR_BONUS * (c.discard in value_honors)))
 
     if not threats or cands[0].discard is None:
         danger = danger_table(opponents, visible_all) if threats else {}

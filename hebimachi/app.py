@@ -12,10 +12,10 @@ from PIL import Image, ImageTk
 
 from .actions import check_calls, check_closed_kan, check_riichi, check_ron, check_tsumo, evaluate_prompt
 from .advisor import Advice, advise
-from .capture import Config, crop, enable_dpi_awareness, grab_screen, list_monitors
+from .capture import Config, calls_region, crop, enable_dpi_awareness, grab_screen, list_monitors
 from .defense import Opponent
 from .efficiency import estimate_draws_left, simulate_tenpai
-from .recognition import PromptReader, TileMatcher, WindReader
+from .recognition import PromptReader, TileMatcher, WindReader, group_calls
 from .tiles import display_name, format_labels, label_to_index, parse, parse_labels, to_counts
 from .yaku import Context
 
@@ -345,12 +345,19 @@ class App:
                     f"rivières={', '.join(self.config.rivers) or 'aucune'}")
 
     def _read_calls(self, img: np.ndarray, hand_dets) -> list | None:
-        """Tuiles de nos appels, plus petites que celles de la main (ce qui écarte la tuile piochée)."""
-        calls_img = crop(img, self.config.calls)
-        if calls_img is None or not hand_dets:
+        """Tuiles de nos appels, plus petites que celles de la main (ce qui écarte la tuile piochée).
+
+        Chaque appel repousse les précédents vers la gauche : la zone s'étend donc jusqu'au début
+        de la main, dont les tuiles sont écartées par leur taille.
+        """
+        region = calls_region(self.config)
+        if region is None or not hand_dets:
             return None
+        x0 = region[0]
         max_long = 0.9 * max(d.h for d in hand_dets)
-        dets = self.matcher.read_tiles(calls_img, max_long=max_long)
+        dets = self.matcher.read_tiles(crop(img, region), max_long=max_long)
+        for d in dets:
+            d.x += x0  # coordonnées écran
         return dets or None
 
     def capture(self):
@@ -366,9 +373,10 @@ class App:
         calls = self._read_calls(img, dets)
         if calls is not None:
             # Les tuiles appelées ne font pas partie de la main, même si les zones se chevauchent.
-            left = self.config.calls[0] + min(d.x for d in calls)
+            left = min(d.x for d in calls)
             dets = [d for d in dets if self.config.hand[0] + d.x + d.w <= left]
-        melds = len(calls) // 3 if calls else 0
+        groups = group_calls(calls) if calls else []
+        melds = len(groups)
         worst = min((d.score for d in dets), default=0.0)
         if len(dets) + 3 * melds not in (13, 14) or worst < HAND_THRESHOLD:
             # Écran flou (menu pause), animation ou fenêtre masquée : on garde la dernière analyse.
@@ -377,7 +385,6 @@ class App:
             return
         before = {k: v.get() for k, v in self.vars.items()}
         self.vars["hand"].set(format_labels([d.label for d in dets]))
-        groups = [calls[i:i + 3] for i in range(0, 3 * melds, 3)] if calls else []
         self.vars["calls"].set(" ".join(format_labels([d.label for d in g]) for g in groups))
         dora_img = crop(img, self.config.dora)
         if dora_img is not None:
@@ -460,9 +467,9 @@ class App:
             visible = to_counts(visible_tiles)
             total_discards = len(mine) + sum(len(o.discards) for o in opponents)
             draws_left = estimate_draws_left(total_discards)
-            adv = advise(hand, visible, opponents, melds, draws_left, calls)
             ctx = Context(27 + WIND_NAMES.index(self.round_var.get()), 27 + WIND_NAMES.index(self.seat_var.get()),
                           self.my_riichi.get(), calls=[parse(g) for g in calls_groups])
+            adv = advise(hand, visible, opponents, melds, draws_left, calls, ctx.value_honors())
             actions = self._actions(hand, ctx, visible, mine, draws_left, sum(o.riichi for o in opponents), adv)
         except ValueError as exc:
             self.summary.set(f"Erreur : {exc}")
@@ -574,7 +581,8 @@ class App:
         riichi = actions.get("riichi")
         if riichi is not None and riichi.recommend:
             return (f"Jetez {display_name(riichi.discard)} et déclarez RIICHI",
-                    riichi.reason + self._kan_note(actions))
+                    riichi.reason + " Le bouton Riichi est caché : appuyez sur Carré pour l'afficher."
+                    + self._kan_note(actions))
         if best.shanten == 0:
             title = f"Jetez {name}  →  TENPAI"
             detail = f"Attente : {tiles_list(best)} ({best.total} tuiles restantes)."

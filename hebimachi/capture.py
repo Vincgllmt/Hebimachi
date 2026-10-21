@@ -67,3 +67,12 @@ def crop(image: np.ndarray, region: Region | None) -> np.ndarray | None:
     x, y, w, h = region
     out = image[max(0, y):y + h, max(0, x):x + w]
     return out if out.size else None
+
+
+def calls_region(config: Config) -> Region | None:
+    """Zone des appels étendue vers la gauche jusqu'au début de la main (3 ou 4 appels la débordent)."""
+    if config.calls is None:
+        return None
+    x, y, w, h = config.calls
+    x0 = min(x, config.hand[0]) if config.hand else x
+    return x0, y, x + w - x0, h

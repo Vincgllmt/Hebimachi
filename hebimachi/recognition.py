@@ -57,6 +57,18 @@ def order_rows(dets: list[Detection]) -> list[Detection]:
     return [d for row in rows for d in sorted(row, key=lambda d: d.x)]
 
 
+def group_calls(dets: list[Detection]) -> list[list[Detection]]:
+    """Appels séparés par un écart net entre tuiles (un kan compte 4 tuiles, pas 3)."""
+    groups: list[list[Detection]] = []
+    for d in sorted(dets, key=lambda d: d.x):
+        prev = groups[-1][-1] if groups else None
+        if prev is not None and d.x - (prev.x + prev.w) < 0.4 * min(d.w, d.h):
+            groups[-1].append(d)
+        else:
+            groups.append([d])
+    return groups
+
+
 class TileMatcher:
     def __init__(self, template_dir: Path):
         self.dir = Path(template_dir)

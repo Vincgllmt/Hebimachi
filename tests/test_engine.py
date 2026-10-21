@@ -86,3 +86,14 @@ def test_open_tanyao_is_fine():
     adv = advise(parse("234m66p345s67s1m"), [0] * 34, [], melds=1, calls=parse("456p"))
     assert adv.ranked[0].discard == parse("1m")[0]
     assert adv.warning == ""
+
+
+def test_value_honors_kept_at_equal_efficiency():
+    """Partie du 21/10 : Sud (vent de siège) = 41 ukeire, Nord = 40 ; on jette le Nord, sans valeur."""
+    from hebimachi.yaku import Context
+
+    hand = parse("256m11359s456p142z")
+    visible = to_counts(parse("7m2z"))
+    assert advise(hand, visible, []).ranked[0].discard == parse("2z")[0]
+    ranked = advise(hand, visible, [], value_honors=Context(27, 28).value_honors()).ranked
+    assert [c.discard for c in ranked[:3]] == parse("421z")
