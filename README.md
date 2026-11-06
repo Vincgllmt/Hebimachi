@@ -1,8 +1,9 @@
-# Hebimachi — assistant de mahjong et de shogi
+# Hebimachi — assistant aux mini-jeux de la série Yakuza
 
-Lit l'écran de **Like a Dragon: Ishin!** et conseille, sans jamais toucher au jeu :
+Lit l'écran des mini-jeux de la série **Yakuza / Like a Dragon** et conseille, sans jamais toucher
+au jeu :
 
-- **Mahjong** (vue de dessus 2D) : reconnaît vos tuiles et classe les défausses selon l'efficacité
+- **Mahjong** : reconnaît vos tuiles et classe les défausses selon l'efficacité
   (shanten, ukeire, probabilités) et la défense face aux riichi, avec en option un objectif de
   victoire (mangan, haneman, full straight).
 - **Shogi** : suit la partie et indique le meilleur coup, en cherchant d'abord un mat forcé.
@@ -15,6 +16,16 @@ D'autres mini-jeux sont étudiés dans [docs/spec-mini-jeux.md](docs/spec-mini-j
 pip install -r requirements.txt
 python -m hebimachi
 ```
+
+## Jeux de la série
+
+Choisissez le jeu dans la liste en haut de la fenêtre. Chaque jeu a son dossier
+`data/games/<id>/`, car l'affichage change d'un opus à l'autre : zones de l'écran et modèles
+appris lui sont propres, et sont à refaire pour chaque nouveau jeu.
+
+Pour ajouter un jeu, créez son dossier avec un `game.json` (`{"name": "Yakuza Kiwami"}`) : il
+apparaît dans la liste, et il ne reste qu'à le calibrer. Un seul jeu est configuré pour l'instant :
+*Like a Dragon: Ishin!*, sur lequel la lecture du mahjong est validée.
 
 ## Mahjong
 

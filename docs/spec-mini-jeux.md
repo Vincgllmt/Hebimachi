@@ -1,30 +1,23 @@
 # Spec — mini-jeux au-delà de la v2
 
-Étude de faisabilité pour baccarat, cho-han, cee-lo, koi-koi, oicho-kabu et billard (combination
-shot, carom shot). Rien de tout cela n'est implémenté : ce document dit ce qui vaut la peine de
-l'être, et ce qu'il faudrait pour le faire.
+Étude de faisabilité pour koi-koi, oicho-kabu et billard (combination shot, carom shot), des
+mini-jeux que l'on retrouve dans la série Yakuza. Rien de tout cela n'est implémenté : ce document
+dit ce qu'il faudrait pour le faire. Premier jeu cible : **Yakuza Kiwami**, le jeu en cours.
 
 Principe commun, inchangé depuis la v1 : Hebimachi **lit l'écran et conseille**. Il ne touche ni
 au jeu ni à la manette.
 
 ## Verdict
 
-| Jeu        | Dans Ishin ? | Faisable ?               | Ce que l'outil apporte                                  | Priorité     |
-|------------|--------------|--------------------------|---------------------------------------------------------|--------------|
-| Koi-koi    | Oui          | Oui                      | Beaucoup : carte à jouer, koi-koi ou arrêt              | 1            |
-| Oicho-kabu | Oui          | Oui                      | Moyen : tirer ou non, selon les cartes vues             | 2            |
-| Cee-lo     | Oui          | Oui, mais peu utile      | Faible : les dés décident, seule la mise se raisonne    | 3            |
-| Billard    | Non trouvé   | Partiellement, à prouver | Aide à la visée, sous condition de la vue de la table   | 4            |
-| Baccarat   | Non trouvé   | Oui, mais peu utile      | Faible : l'avantage reste au casino, même en comptant   | 5            |
-| Cho-han    | Oui          | Rien à calculer          | Aucun : pair ou impair à 50 %, sans décision à éclairer | Ne pas faire |
+| Jeu        | Faisable ?               | Ce que l'outil apporte                                | Priorité |
+|------------|--------------------------|-------------------------------------------------------|----------|
+| Koi-koi    | Oui                      | Beaucoup : carte à jouer, koi-koi ou arrêt            | 1        |
+| Oicho-kabu | Oui                      | Moyen : tirer ou non, selon les cartes vues           | 2        |
+| Billard    | Partiellement, à prouver | Aide à la visée, sous condition de la vue de la table | 3        |
 
-« Dans Ishin ? » vient de guides en ligne, pas d'un relevé en jeu : ils citent koi-koi, oicho-kabu,
-cee-lo et cho-han au tripot, mais ni baccarat ni billard. Le billard apparaît dans *Like a Dragon
-Gaiden*. Ces deux jeux demanderaient donc un autre jeu cible (`data/games/<id>/`, déjà prévu pour
-ça) : **à confirmer en premier**, car cela décide si la ligne a un sens.
-
-Ordre conseillé : koi-koi, puis oicho-kabu ; le reste seulement s'il y a un besoin précis, comme
-un objectif de la liste de complétion.
+Les règles, les barèmes et l'affichage changent d'un jeu de la série à l'autre. Chaque jeu garde
+donc ses particularités dans `data/games/<id>/`, et les chiffres de ce document sont à vérifier
+sur le jeu visé.
 
 ## Socle à construire une seule fois
 
@@ -67,7 +60,7 @@ qui prend la première carte possible et s'arrête au premier yaku.
 
 **Règles de base.** 40 cartes de valeur 1 à 10, 4 de chaque. La main vaut la somme modulo 10 ; 9
 (kabu) est le mieux. Les mains spéciales (arashi, shippin, kuppin…) et les règles de tirage du
-croupier **varient selon les jeux : à relever dans Ishin avant de coder**.
+croupier **varient selon les jeux : à relever dans le jeu visé avant de coder**.
 
 **Conseil.** Tirer ou rester, et sur quelle mise placer ses jetons. Le calcul est exact, sans
 simulation : on énumère les cartes restantes après retrait des cartes vues, on applique la règle
@@ -80,21 +73,7 @@ vérifié sur 10 mains réelles relevées à la main.
 
 **Taille :** moyenne, moins encore une fois `cards/` en place.
 
-## Cee-lo — priorité 3
-
-**Ce que disent les maths.** Sur un lancer de 3 dés (216 issues) : brelan 2,8 %, 4-5-6 2,8 %,
-1-2-3 2,8 %, point 41,7 %, rien 50 %. Avec 3 lancers au plus, le résultat final se répartit ainsi :
-brelan 4,9 %, 4-5-6 4,9 %, 1-2-3 4,9 %, chaque point de 1 à 6 12,2 %, rien 12,5 %.
-
-**Limite.** Le joueur ne choisit rien pendant le lancer. Si le dé est tiré au hasard, l'outil ne
-peut éclairer que la mise, par exemple la probabilité de battre le point affiché par le banquier.
-Si le jeu a un mini-jeu d'adresse sur le lancer, cela change tout, mais ce n'est pas une question
-de calcul.
-
-**Proposition.** Un tableau statique de probabilités contre chaque point du banquier, sans vision.
-Quelques heures de travail. À faire seulement si les mises sont un vrai frein en jeu.
-
-## Billard — priorité 4
+## Billard — priorité 3
 
 **À prouver d'abord.** Tout dépend de la vue. En vue de dessus, c'est de la géométrie ; avec une
 caméra 3D derrière la queue, il faut redresser la table par ses 4 coins, comme le plateau de shogi,
@@ -128,42 +107,9 @@ coups conseillés réussis sur au moins 7 essais sur 10 en jeu, à la main.
 
 **Taille :** grande, risque élevé.
 
-## Baccarat — priorité 5
-
-**Ce que disent les maths.** Avec 8 jeux : banque 45,86 %, joueur 44,62 %, égalité 9,52 %. Avantage
-du casino : 1,06 % sur la banque (avec 5 % de commission), 1,24 % sur le joueur, 14,36 % sur
-l'égalité payée 8 pour 1. Le tirage est entièrement réglé par le tableau officiel : aucune décision
-pendant le coup.
-
-**Ce que l'outil pourrait faire.** Compter les cartes sorties et recalculer exactement les trois
-probabilités. Le comptage au baccarat ne donne un avantage qu'à de rares moments en fin de sabot,
-et trop faible pour compter en pratique. Sans sabot suivi d'un coup à l'autre, ou si le jeu rebat
-à chaque main, il n'y a plus rien à calculer et le conseil se résume à « misez sur la banque ».
-
-**Proposition.** Ne rien construire tant qu'on ne sait pas si le jeu cible en a un et comment il
-gère le sabot. Si oui : le lecteur `cards/` plus une énumération exacte, de taille moyenne.
-
-## Cho-han — à ne pas faire
-
-Deux dés, pair ou impair : 18 issues sur 36 de chaque côté, soit 50 % exactement, et les dés sont
-cachés au moment de miser. Un outil afficherait 50 % à chaque coup. Les séries passées n'annoncent
-rien, et prétendre le contraire serait trompeur. Seul cas à revoir : si le jeu donne un indice
-avant de miser ou propose des paris annexes aux gains mal calibrés, ce qui est à vérifier dans ses
-règles.
-
 ## Ce qu'il faut pour démarrer
 
-1. Confirmer le jeu cible pour le billard et le baccarat.
-2. Pour chaque jeu retenu, 5 à 10 captures en 1920×1080 à des moments différents ; pour le billard,
-   avec la visée active.
+1. Créer le dossier du jeu cible dans `data/games/<id>/`.
+2. Pour chaque mini-jeu retenu, 5 à 10 captures en 1920×1080 à des moments différents ; pour le
+   billard, avec la visée active.
 3. Relever dans le jeu : table des yaku et barème du koi-koi, règles de tirage de l'oicho-kabu.
-
-## Sources
-
-- [Mini-jeux d'Ishin, Gamepressure](https://www.gamepressure.com/like-a-dragon-ishin/mini-games/zb10910)
-- [Tripot d'Ishin, Gamepressure](https://www.gamepressure.com/like-a-dragon-ishin/where-is-the-casino/zf108d2)
-- [Liste des mini-jeux, Gamer Guides](https://www.gamerguides.com/like-a-dragon-ishin/guide/minigames)
-- [Mini-jeux de Gaiden, eXputer](https://exputer.com/guides/like-a-dragon-gaiden-minigames/)
-
-Les chiffres de cee-lo et de cho-han se recalculent par simple dénombrement ; ceux du baccarat sont
-les valeurs usuelles pour 8 jeux.
