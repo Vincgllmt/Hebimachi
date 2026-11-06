@@ -20,6 +20,7 @@ class Candidate:
     p_next: float                # P(la prochaine pioche fait avancer la main)
     p_within: float              # P(avancer au moins une fois d'ici la fin du mur)
     p_tenpai: float | None = None  # P(tenpai d'ici la fin) estimée par Monte Carlo
+    goal: object = None          # goals.GoalOption quand un objectif de victoire est choisi
 
 
 @dataclass

@@ -5,12 +5,13 @@ avec une recommandation et une raison courte, pour répondre au prompt du jeu.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from .efficiency import analyze
+from .efficiency import analyze, remaining_counts
+from .goals import goal_status, rank_discards
 from .shanten import shanten
 from .tiles import display_name, to_counts
-from .yaku import Context, call_set, find_yaku
+from .yaku import Context, Score, call_set, evaluate, find_yaku
 
 
 @dataclass
@@ -38,30 +39,42 @@ def waits(hand13: list[int], melds: int) -> list[int]:
     return out
 
 
+def has_goal(ctx: Context) -> bool:
+    return ctx.goal is not None and ctx.goal.active
+
+
 # ---------- victoire ----------
+def _win_decision(action: str, score: Score, ctx: Context) -> Decision:
+    """Victoire possible : on la prend, sauf si elle ne remplit pas l'objectif choisi."""
+    value = f"{', '.join(score.names)} — {score.label()}"
+    if has_goal(ctx) and not ctx.goal.satisfied(score):
+        note = " En riichi, passer vous met en furiten : il faudra un tsumo." if ctx.riichi else ""
+        return Decision(action, False, f"Ne gagnez pas : {value}, objectif {ctx.goal.label()} "
+                                       f"non atteint.{note}")
+    return Decision(action, True, f"Victoire ! Yaku : {value}.")
+
+
 def check_ron(hand13: list[int], tile: int, ctx: Context, my_discards: list[int]) -> Decision | None:
     melds = len(ctx.calls)
     if tile not in waits(hand13, melds):
         return None
-    ron_ctx = Context(ctx.round_wind, ctx.seat_wind, ctx.riichi, False, ctx.calls)
-    yaku = find_yaku(hand13 + [tile], tile, ron_ctx)
+    score = evaluate(hand13 + [tile], tile, replace(ctx, tsumo=False))
     furiten = [w for w in waits(hand13, melds) if w in my_discards]
     if furiten:
         return Decision("RON", False, f"Furiten : vous avez déjà jeté {display_name(furiten[0])}, "
                                       "le ron est interdit (seul le tsumo est permis).")
-    if not yaku:
+    if score is None:
         return Decision("RON", False, "Main complète mais SANS YAKU : le ron est impossible.")
-    return Decision("RON", True, f"Victoire ! Yaku : {', '.join(yaku)}.")
+    return _win_decision("RON", score, ctx)
 
 
 def check_tsumo(hand14: list[int], drawn: int, ctx: Context) -> Decision | None:
     if shanten(to_counts(hand14), len(ctx.calls)) != -1:
         return None
-    tsumo_ctx = Context(ctx.round_wind, ctx.seat_wind, ctx.riichi, True, ctx.calls)
-    yaku = find_yaku(hand14, drawn, tsumo_ctx)
-    if not yaku:
+    score = evaluate(hand14, drawn, replace(ctx, tsumo=True))
+    if score is None:
         return Decision("TSUMO", False, "Main complète mais SANS YAKU : impossible de déclarer tsumo.")
-    return Decision("TSUMO", True, f"Victoire ! Yaku : {', '.join(yaku)}.")
+    return _win_decision("TSUMO", score, ctx)
 
 
 # ---------- riichi ----------
@@ -74,6 +87,8 @@ def check_riichi(hand14: list[int], visible: list[int], ctx: Context, draws_left
     tenpai = [c for c in a.candidates if c.shanten == 0]
     if not tenpai:
         return None
+    if has_goal(ctx):
+        return _goal_riichi(hand14, tenpai, ctx, draws_left)
     best = max(tenpai, key=lambda c: c.total)
     if draws_left < 1:
         return Decision("RIICHI", False, "Plus assez de tuiles au mur pour déclarer riichi.", best.discard)
@@ -82,7 +97,7 @@ def check_riichi(hand14: list[int], visible: list[int], ctx: Context, draws_left
                         best.discard)
     hand13 = list(hand14)
     hand13.remove(best.discard)
-    has_yaku = any(find_yaku(hand13 + [w], w, Context(ctx.round_wind, ctx.seat_wind, False, False))
+    has_yaku = any(find_yaku(hand13 + [w], w, replace(ctx, riichi=False, tsumo=False))
                    for w in best.ukeire)
     wait_txt = ", ".join(display_name(t) for t in sorted(best.ukeire))
     if threats and best.total <= 4 and has_yaku:
@@ -91,6 +106,41 @@ def check_riichi(hand14: list[int], visible: list[int], ctx: Context, draws_left
     reason = f"Tenpai fermé, attente {wait_txt} ({best.total} tuiles)."
     reason += " Le riichi ajoute de la valeur." if has_yaku else " Sans riichi, pas de yaku pour gagner en ron."
     return Decision("RIICHI", True, reason, best.discard)
+
+
+def _reaches_goal(hand13: list[int], wait: int, ctx: Context, **state) -> bool:
+    score = evaluate(hand13 + [wait], wait, replace(ctx, **state))
+    return score is not None and ctx.goal.satisfied(score)
+
+
+def _goal_riichi(hand14: list[int], tenpai: list, ctx: Context, draws_left: int) -> Decision:
+    """Avec un objectif, le riichi ne vaut que s'il fait passer la main au-dessus du seuil."""
+    goal = ctx.goal
+    options = []
+    for c in tenpai:
+        hand13 = list(hand14)
+        hand13.remove(c.discard)
+        dama = {w: n for w, n in c.ukeire.items()
+                if _reaches_goal(hand13, w, ctx, riichi=False, tsumo=False)}
+        ron = {w: n for w, n in c.ukeire.items()
+               if _reaches_goal(hand13, w, ctx, riichi=True, tsumo=False)}
+        tsumo = {w: n for w, n in c.ukeire.items()
+                 if _reaches_goal(hand13, w, ctx, riichi=True, tsumo=True)}
+        options.append((sum(ron.values()), sum(tsumo.values()), sum(dama.values()), c, tsumo))
+    n_ron, n_tsumo, n_dama, best, tsumo = max(options, key=lambda o: o[:3])
+    if draws_left < 1:
+        return Decision("RIICHI", False, "Plus assez de tuiles au mur pour déclarer riichi.", best.discard)
+    if n_tsumo == 0:
+        return Decision("RIICHI", False, f"Même avec riichi, aucune attente n'atteint l'objectif "
+                                         f"{goal.label()} : améliorez la main.", best.discard)
+    if n_dama >= n_ron:
+        return Decision("RIICHI", False, f"Objectif {goal.label()} déjà atteint sans riichi : "
+                                         "restez dama, les adversaires se méfieront moins.", best.discard)
+    names = ", ".join(display_name(t) for t in sorted(tsumo))
+    how = (f"sur ron ou tsumo ({n_ron} tuiles)" if n_ron == n_tsumo
+           else f"sur {n_tsumo} tuiles, dont {n_ron} en ron : les autres en tsumo seulement")
+    return Decision("RIICHI", True, f"Le riichi atteint l'objectif {goal.label()} avec {names}, {how}.",
+                    best.discard)
 
 
 # ---------- appels ----------
@@ -140,8 +190,31 @@ def _winning_waits(rest: list[int], best, calls: list[list[int]], ctx: Context) 
     """Attentes après l'appel et la défausse : tuiles restantes si elles donnent un yaku, sinon None."""
     hand = list(rest)
     hand.remove(best.discard)
-    open_ctx = Context(ctx.round_wind, ctx.seat_wind, False, False, calls)
+    open_ctx = replace(ctx, riichi=False, tsumo=False, calls=calls)
     return {t: (n if find_yaku(hand + [t], t, open_ctx) else None) for t, n in best.ukeire.items()}
+
+
+def _goal_call(kind: str, used: tuple[int, ...], rest: list[int], new_calls: list[list[int]],
+               forbidden: set[int], skip, vis: list[int], ctx: Context, threats: int) -> Decision:
+    """Avec un objectif, on n'appelle que si l'appel rapproche de la main voulue."""
+    goal = ctx.goal
+    after = replace(ctx, calls=new_calls)
+    options = rank_discards(rest, after, remaining_counts(to_counts(rest), vis), forbidden)
+    if not options:
+        return Decision(kind, False, f"Après cet appel, l'objectif {goal.label()} serait hors "
+                                     "d'atteinte.", None, used)
+    discard = min(options, key=lambda d: (options[d].shanten, -options[d].total))
+    opt = options[discard]
+    before = f"{skip.shanten} → {opt.shanten}" if skip else f"impossible → {opt.shanten}"
+    if threats and opt.shanten >= 1:
+        return Decision(kind, False, "Riichi adverse : appeler vous prive de tuiles sûres sans vous "
+                                     "mettre tenpai.", discard, used)
+    if skip is not None and opt.shanten >= skip.shanten:
+        return Decision(kind, False, f"Ne rapproche pas de l'objectif {goal.label()} "
+                                     f"(shanten {before}) : gardez la main.", discard, used)
+    return Decision(kind, True, f"Rapproche de l'objectif {goal.label()} (shanten {before}), plan "
+                                f"{opt.plan}, environ {opt.han} han. Puis jetez {display_name(discard)}.",
+                    discard, used)
 
 
 def check_calls(hand13: list[int], tile: int, from_kamicha: bool, ctx: Context,
@@ -152,6 +225,7 @@ def check_calls(hand13: list[int], tile: int, from_kamicha: bool, ctx: Context,
     counts = to_counts(hand13)
     melds = len(ctx.calls)
     skip = analyze(hand13, visible, melds, draws_left).candidates[0]
+    goal_skip = goal_status(hand13, ctx, remaining_counts(counts, visible)) if has_goal(ctx) else None
     decisions = []
     for kind, used in _options(counts, tile, from_kamicha):
         rest = list(hand13)
@@ -176,6 +250,9 @@ def check_calls(hand13: list[int], tile: int, from_kamicha: bool, ctx: Context,
                 forbidden.add(hi + 1)
             if tile == hi and lo % 9 > 0:
                 forbidden.add(lo - 1)
+        if has_goal(ctx):
+            decisions.append(_goal_call(kind, used, rest, new_calls, forbidden, goal_skip, vis, ctx, threats))
+            continue
         cands = [c for c in analyze(rest, vis, melds + 1, draws_left).candidates
                  if c.discard not in forbidden]
         if not cands:

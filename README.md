@@ -1,7 +1,13 @@
-# Hebimachi — assistant probabiliste de Riichi Mahjong
+# Hebimachi — assistant de mahjong et de shogi
 
-Lit l'écran du mahjong de **Like a Dragon: Ishin!** (vue de dessus 2D), reconnaît vos tuiles et classe les défausses selon
-l'efficacité (shanten, ukeire, probabilités) et la défense face aux riichi.
+Lit l'écran de **Like a Dragon: Ishin!** et conseille, sans jamais toucher au jeu :
+
+- **Mahjong** (vue de dessus 2D) : reconnaît vos tuiles et classe les défausses selon l'efficacité
+  (shanten, ukeire, probabilités) et la défense face aux riichi, avec en option un objectif de
+  victoire (mangan, haneman, full straight).
+- **Shogi** : suit la partie et indique le meilleur coup, en cherchant d'abord un mat forcé.
+
+D'autres mini-jeux sont étudiés dans [docs/spec-mini-jeux.md](docs/spec-mini-jeux.md).
 
 ## Lancer
 
@@ -10,7 +16,9 @@ pip install -r requirements.txt
 python -m hebimachi
 ```
 
-## Première utilisation
+## Mahjong
+
+### Première utilisation
 
 1. Choisissez l'écran du jeu dans la liste déroulante, puis **Zones…** : encadrez votre
    main, les indicateurs dora, puis les quatre rivières (Échap pour ignorer une zone).
@@ -25,7 +33,30 @@ Les rivières sont lues automatiquement, dans l'ordre des défausses ; une tuile
 coche « Riichi » pour ce joueur. Tous les champs restent modifiables à la main, et l'on
 peut tout saisir sans vision puis cliquer sur **Analyser**.
 
-## Colonnes
+### Objectifs de victoire
+
+Trois cases optionnelles et indépendantes, à cocher quand il faut gagner d'une certaine façon
+(par exemple pour la liste de complétion) :
+
+| Case          | Une victoire compte si…                                          |
+|---------------|------------------------------------------------------------------|
+| Mangan        | elle vaut au moins un mangan (5 han, ou 4 han 40 fu, 3 han 70 fu) |
+| Haneman       | elle vaut au moins un haneman (6 han) ; prime sur Mangan          |
+| Full straight | elle contient l'ittsu ; se combine avec les deux autres           |
+
+Une fois coché, l'objectif change tous les conseils :
+
+- **Défausses** : classées vers le plan de yaku le plus proche qui atteint l'objectif (colonne
+  **Objectif** : distance au tenpai et plan visé). Les dora et cinq rouges comptent.
+- **Ron et tsumo** : une victoire insuffisante est déconseillée, avec sa valeur exacte.
+- **Riichi** : conseillé seulement s'il fait passer le seuil ; dama si l'objectif est déjà atteint.
+- **Appels** : acceptés seulement s'ils rapprochent de l'objectif.
+
+Face à un riichi adverse, la défense reste prioritaire. Sont ignorés car inconnus d'avance : ura
+dora, ippatsu et autres yaku de circonstance ; la valeur annoncée est donc un minimum. Un kan
+fermé saisi dans « Mes appels » compte comme un appel ouvert.
+
+### Colonnes
 
 | Colonne      | Signification                                                                  |
 |--------------|--------------------------------------------------------------------------------|
@@ -39,6 +70,31 @@ peut tout saisir sans vision puis cliquer sur **Analyser**.
 Modes : **Attaque** (pas de riichi), **Push** (tenpai avec ≥ 4 ukeire), **Prudence**
 (iishanten : on n'avance qu'avec une tuile ≤ 3 % de danger), **Défense** (main lointaine).
 
+## Shogi
+
+### Première utilisation
+
+1. Onglet **Shogi**, choisissez votre camp (**Je joue**), puis **Coins du plateau…** : cliquez les
+   quatre coins de la grille. Une vue inclinée convient aussi.
+2. Sur la position de départ, vos pièces en bas : **Apprendre les pièces**. Un seul écran suffit.
+3. **Lire l'écran** (ou **Auto**) à chaque coup : le conseil s'affiche quand c'est à vous de jouer.
+
+Hebimachi n'a pas besoin de lire les pièces en main : il retrouve chaque coup joué en comparant le
+plateau aux coups légaux, et sait donc ce qui a été capturé. Il faut pour cela suivre la partie
+depuis le début ; sinon **Reprendre depuis l'écran** repart du plateau affiché, en donnant les
+pièces inconnues à l'adversaire. Vérifiez alors les pièces en main (clic droit pour corriger).
+Les pièces promues s'apprennent seules la première fois qu'elles apparaissent.
+
+Sans vision, tout se joue aussi à la souris sur le plateau, et une position se colle en SFEN, par
+exemple pour un problème de tsume.
+
+### Force de jeu
+
+Le moteur intégré en Python cherche d'abord un mat forcé, puis quelques coups d'avance (profondeur
+de 3 à 8 selon la position, avec 3 s par coup) : il joue correctement, sans plus. Pour le meilleur
+conseil possible, **Choisir un moteur USI…** branche un moteur externe, comme YaneuraOu ou
+Fairy-Stockfish, à installer soi-même.
+
 ## Architecture
 
 ```
@@ -47,10 +103,21 @@ hebimachi/
   shanten.py      shanten standard / chiitoitsu / kokushi (DP mémoïsée)
   efficiency.py   ukeire, probabilités, Monte Carlo
   defense.py      danger des tuiles face au riichi
-  advisor.py      combine efficacité et défense
+  yaku.py         yaku, han, fu et points d'une main complète
+  goals.py        objectifs de victoire : plans de yaku et classement des défausses
+  actions.py      ron, tsumo, riichi, appels
+  advisor.py      combine efficacité, défense et objectif
   recognition.py  template matching OpenCV
   capture.py      capture d'écran (mss) et configuration des zones
+  games.py        jeux pris en charge (data/games/<id>/)
   app.py          interface tkinter
+  shogi/
+    position.py   règles, SFEN/USI, coups légaux (validés par perft)
+    search.py     solveur de mat et alpha-bêta
+    usi.py        client pour moteur externe
+    vision.py     redressement du plateau et lecture des pièces
+    session.py    suivi de la partie, synchronisation avec l'écran
+    panel.py      onglet Shogi
 ```
 
 Tests : `python -m pytest`

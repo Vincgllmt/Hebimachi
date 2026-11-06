@@ -5,7 +5,9 @@ from dataclasses import dataclass
 
 from .defense import Opponent, danger_table
 from .efficiency import Analysis, Candidate, analyze
+from .goals import goal_status, rank_discards
 from .tiles import display_name, to_counts
+from .yaku import Context
 
 SAFE_THRESHOLD = 3.0  # % de danger toléré quand on est iishanten face à un riichi
 # Un honneur qui donne un yaku (dragon, vent de table ou de siège) « vaut » quelques tuiles
@@ -21,6 +23,7 @@ class Advice:
     ranked: list[Candidate]
     danger: dict[int, tuple[float, str]]  # vide s'il n'y a pas de riichi
     warning: str = ""
+    goal_note: str = ""    # où en est l'objectif de victoire, s'il y en a un
 
 
 def open_yaku(counts: list[int]) -> list[str]:
@@ -67,10 +70,44 @@ def yaku_warning(hand: list[int], calls: list[int], best: Candidate) -> str:
 
 def advise(hand: list[int], visible: list[int], opponents: list[Opponent],
            melds: int = 0, draws_left: int | None = None, calls: list[int] | None = None,
-           value_honors: set[int] = frozenset()) -> Advice:
+           value_honors: set[int] = frozenset(), ctx: Context | None = None) -> Advice:
     adv = _advise(hand, visible, opponents, melds, draws_left, value_honors)
+    if ctx is not None and ctx.goal is not None and ctx.goal.active:
+        _apply_goal(adv, hand, ctx)
     adv.warning = yaku_warning(hand, calls or [], adv.ranked[0])
     return adv
+
+
+def _apply_goal(adv: Advice, hand: list[int], ctx: Context) -> None:
+    """Reclasse les défausses vers l'objectif ; face à un riichi, la défense garde la priorité."""
+    goal, remaining = ctx.goal, adv.analysis.remaining
+    if adv.ranked[0].discard is None:
+        status = goal_status(hand, ctx, remaining)
+        adv.ranked[0].goal = status
+        adv.goal_note = _goal_note(goal.label(), status)
+        return
+    options = rank_discards(hand, ctx, remaining)
+    for c in adv.ranked:
+        c.goal = options.get(c.discard)
+    if not options:
+        adv.goal_note = _goal_note(goal.label(), None)
+        return
+    if adv.mode == "Attaque":
+        far = (99, 0)
+        adv.ranked.sort(key=lambda c: (c.goal.shanten, -c.goal.total) if c.goal else far)
+    best = min(options.values(), key=lambda o: (o.shanten, -o.total))
+    adv.goal_note = _goal_note(goal.label(), best)
+    if adv.mode != "Attaque":
+        adv.goal_note += " Riichi adverse : la défense passe avant l'objectif."
+
+
+def _goal_note(label: str, option) -> str:
+    if option is None:
+        return f"Objectif {label} hors d'atteinte avec cette main : conseil standard."
+    if option.shanten < 0:
+        return f"Objectif {label} : main complète, plan {option.plan}."
+    step = "tenpai" if option.shanten == 0 else f"{option.shanten}-shanten"
+    return f"Objectif {label} : {step} sur le plan {option.plan} (environ {option.han} han)."
 
 
 def _advise(hand: list[int], visible: list[int], opponents: list[Opponent],

@@ -1,8 +1,11 @@
-"""Détection des yaku d'une main complète.
+"""Détection des yaku et calcul de la valeur d'une main complète (han, fu, points).
 
-Couvre les yaku courants : riichi, menzen tsumo, tanyao, yakuhai, pinfu, iipeiko,
-sanshoku, ittsu, toitoi, chanta/junchan, honitsu/chinitsu, chiitoitsu, kokushi.
-Ne compte pas les han : il s'agit de savoir si l'on PEUT gagner.
+`evaluate` essaie toutes les lectures de la main, et pour chacune toutes les places
+possibles de la tuile gagnante, puis garde la plus chère. `find_yaku` n'en donne que
+les noms, pour savoir si l'on PEUT gagner.
+
+Non comptés car inconnus au moment de décider : ura dora, ippatsu, haitei, rinshan,
+chankan, double riichi. Une valeur annoncée est donc un minimum.
 """
 from __future__ import annotations
 
@@ -12,6 +15,14 @@ from .shanten import shanten_kokushi
 from .tiles import to_counts
 
 Set = tuple[str, int]  # ("seq", première tuile) ou ("tri", tuile)
+Yaku = tuple[str, int]  # (nom, han)
+
+YAKUMAN = 13
+DRAGONS = (31, 32, 33)
+WINDS = (27, 28, 29, 30)
+GREEN = {19, 20, 21, 23, 25, 32}  # 2 3 4 6 8 sou et Vert
+LIMITS = ((13, "yakuman", 8000), (11, "sanbaiman", 6000), (8, "baiman", 4000),
+          (6, "haneman", 3000), (5, "mangan", 2000))
 
 
 @dataclass
@@ -21,6 +32,9 @@ class Context:
     riichi: bool = False          # nous avons déclaré riichi
     tsumo: bool = False           # victoire sur notre pioche (sinon ron)
     calls: list[list[int]] = field(default_factory=list)  # nos appels, un groupe par appel
+    dora: list[int] = field(default_factory=list)  # tuiles dora (pas les indicateurs)
+    aka: list[int] = field(default_factory=list)   # tuiles dont nous tenons le cinq rouge
+    goal: object = None           # objectif de victoire (goals.Goal), None = gagner tout court
 
     @property
     def closed(self) -> bool:
@@ -28,6 +42,35 @@ class Context:
 
     def value_honors(self) -> set[int]:
         return {31, 32, 33, self.round_wind, self.seat_wind}
+
+
+@dataclass
+class Score:
+    yaku: list[Yaku]
+    dora: int       # dora et cinq rouges, comptés seulement s'il y a un yaku
+    han: int
+    fu: int
+    limit: str      # "" sous le mangan, sinon mangan … yakuman
+    base: int       # points de base : le mangan commence à 2000
+    ron: int        # points gagnés sur ron (non-donneur)
+    ron_dealer: int
+
+    @property
+    def names(self) -> list[str]:
+        return [n for n, _ in self.yaku]
+
+    def label(self) -> str:
+        """« mangan (5 han) » ou « 3 han 40 fu »."""
+        return f"{self.limit} ({self.han} han)" if self.limit else f"{self.han} han {self.fu} fu"
+
+
+def next_dora(indicator: int) -> int:
+    """Tuile dora désignée par un indicateur."""
+    if indicator < 27:
+        return indicator - indicator % 9 + (indicator % 9 + 1) % 9
+    if indicator < 31:
+        return 27 + (indicator - 27 + 1) % 4
+    return 31 + (indicator - 31 + 1) % 3
 
 
 def call_set(group: list[int]) -> Set:
@@ -79,66 +122,215 @@ def _is_terminal_or_honor(t: int) -> bool:
     return t >= 27 or t % 9 in (0, 8)
 
 
-def find_yaku(hand: list[int], win_tile: int, ctx: Context) -> list[str]:
-    """Yaku d'une main complète. `hand` contient la tuile gagnante, sans les appels."""
-    counts = to_counts(hand)
-    all_tiles = hand + [t for g in ctx.calls for t in g]
-    base = []
+def limit_of(han: int, fu: int) -> tuple[str, int]:
+    """(nom de la limite, points de base)."""
+    for threshold, name, base in LIMITS:
+        if han >= threshold:
+            return name, base
+    base = fu * 2 ** (han + 2)
+    return ("mangan", 2000) if base >= 2000 else ("", base)
+
+
+def _round100(x: int) -> int:
+    return -(-x // 100) * 100
+
+
+def _score(yaku: list[Yaku], dora: int, fu: int) -> Score:
+    han = sum(h for _, h in yaku)
+    if han >= YAKUMAN:  # les yakuman ne se cumulent pas avec les dora
+        dora = 0
+    total = han + dora
+    limit, base = limit_of(total, fu)
+    return Score(yaku, dora, total, fu, limit, base, _round100(base * 4), _round100(base * 6))
+
+
+def _hand_yaku(all_tiles: list[int], ctx: Context) -> list[Yaku]:
+    """Yaku qui ne dépendent pas de la lecture de la main."""
+    closed = ctx.closed
+    yaku: list[Yaku] = []
     if ctx.riichi:
-        base.append("riichi")
-    if ctx.closed and ctx.tsumo:
-        base.append("menzen tsumo")
+        yaku.append(("riichi", 1))
+    if closed and ctx.tsumo:
+        yaku.append(("menzen tsumo", 1))
     suits = {t // 9 for t in all_tiles if t < 27}
     if len(suits) == 1:
-        base.append("chinitsu" if all(t < 27 for t in all_tiles) else "honitsu")
+        if all(t < 27 for t in all_tiles):
+            yaku.append(("chinitsu", 6 if closed else 5))
+        else:
+            yaku.append(("honitsu", 3 if closed else 2))
     if all(not _is_terminal_or_honor(t) for t in all_tiles):
-        base.append("tanyao")
+        yaku.append(("tanyao", 1))
+    return yaku
+
+
+def _yakuman(all_tiles: list[int], counts: list[int], ctx: Context) -> list[Yaku]:
+    """Yakuman de forme : valables quelle que soit la lecture de la main."""
+    yaku: list[Yaku] = []
+    if all(t >= 27 for t in all_tiles):
+        yaku.append(("tsuuiisou (yakuman)", YAKUMAN))
+    if all(t < 27 and t % 9 in (0, 8) for t in all_tiles):
+        yaku.append(("chinroutou (yakuman)", YAKUMAN))
+    if all(t in GREEN for t in all_tiles):
+        yaku.append(("ryuuiisou (yakuman)", YAKUMAN))
+    if ctx.closed and all(t < 27 for t in all_tiles) and len({t // 9 for t in all_tiles}) == 1:
+        base = all_tiles[0] // 9 * 9
+        need = (3, 1, 1, 1, 1, 1, 1, 1, 3)
+        if all(counts[base + i] >= need[i] for i in range(9)):
+            yaku.append(("chuuren poutou (yakuman)", YAKUMAN))
+    return yaku
+
+
+def _keep_yakuman(yaku: list[Yaku]) -> list[Yaku]:
+    """Un yakuman efface les yaku ordinaires."""
+    return [y for y in yaku if y[1] >= YAKUMAN] or yaku
+
+
+def evaluate(hand: list[int], win_tile: int, ctx: Context) -> Score | None:
+    """Valeur d'une main complète (`hand` contient la tuile gagnante, sans les appels).
+
+    Renvoie None si la main n'est pas complète ou n'a aucun yaku.
+    """
+    counts = to_counts(hand)
+    all_tiles = hand + [t for g in ctx.calls for t in g]
+    all_counts = to_counts(all_tiles)
+    dora = sum(all_counts[t] for t in ctx.dora) + sum(1 for t in ctx.aka if all_counts[t])
 
     if ctx.closed and shanten_kokushi(counts) == -1:
-        return ["kokushi musou (yakuman)"]
+        return _score([("kokushi musou (yakuman)", YAKUMAN)], 0, 0)
 
-    best: list[str] = []
-    call_sets = [call_set(g) for g in ctx.calls]
+    base = _hand_yaku(all_tiles, ctx)
+    shape = _yakuman(all_tiles, counts, ctx)
+    best: Score | None = None
+
+    def consider(yaku: list[Yaku], fu: int) -> None:
+        nonlocal best
+        if not yaku:
+            return
+        score = _score(_keep_yakuman(yaku), dora, fu)
+        if best is None or (score.base, score.han, score.fu) > (best.base, best.han, best.fu):
+            best = score
+
     for pair, sets in decompositions(counts, 4 - len(ctx.calls)):
-        yaku = _standard_yaku(pair, sets, call_sets, win_tile, ctx)
-        if len(yaku) > len(best):
-            best = yaku
+        for slot in _win_slots(pair, sets, win_tile):
+            yaku, fu = _reading(pair, sets, slot, win_tile, ctx)
+            consider(base + yaku + shape, fu)
     if ctx.closed and sum(1 for x in counts if x == 2) == 7:
-        chiitoi = ["chiitoitsu"]
-        if len(chiitoi) > len(best):
-            best = chiitoi
-    return base + best
+        pairs = base + [("chiitoitsu", 2)] + shape
+        if all(_is_terminal_or_honor(t) for t in all_tiles):
+            pairs.append(("honroutou", 2))
+        consider(pairs, 25)
+    return best
 
 
-def _standard_yaku(pair: int, closed_sets: list[Set], call_sets: list[Set],
-                   win: int, ctx: Context) -> list[str]:
-    sets = closed_sets + call_sets
+def find_yaku(hand: list[int], win_tile: int, ctx: Context) -> list[str]:
+    """Noms des yaku d'une main complète. `hand` contient la tuile gagnante, sans les appels."""
+    score = evaluate(hand, win_tile, ctx)
+    return score.names if score else []
+
+
+def _win_slots(pair: int, sets: list[Set], win: int) -> list[int]:
+    """Places possibles de la tuile gagnante : -1 = la paire, sinon l'indice du groupe."""
+    slots = [i for i, s in enumerate(sets) if win in _tiles_of(s)]
+    return slots + [-1] if pair == win else slots
+
+
+def _is_ryanmen(start: int, win: int) -> bool:
+    return (win == start and start % 9 != 6) or (win == start + 2 and start % 9 != 0)
+
+
+def _reading(pair: int, closed_sets: list[Set], slot: int, win: int,
+             ctx: Context) -> tuple[list[Yaku], int]:
+    """Yaku et fu d'une lecture : `slot` dit quel groupe la tuile gagnante complète."""
+    closed = ctx.closed
+    sets = closed_sets + [call_set(g) for g in ctx.calls]
     seqs = [t for k, t in sets if k == "seq"]
     tris = [t for k, t in sets if k == "tri"]
+    kans = sum(1 for g in ctx.calls if len(g) == 4)
     values = ctx.value_honors()
-    yaku = []
+    # Un brelan complété par un ron compte comme ouvert (fu et sanankou).
+    ron_tri = not ctx.tsumo and slot >= 0 and closed_sets[slot][0] == "tri"
+    concealed = sum(1 for k, _ in closed_sets if k == "tri") - ron_tri
+    yaku: list[Yaku] = []
+
+    def add(name: str, closed_han: int, open_han: int | None = None) -> None:
+        yaku.append((name, closed_han if closed or open_han is None else open_han))
+
     for t in tris:
-        if t in (31, 32, 33):
-            yaku.append("yakuhai")
+        if t in DRAGONS:
+            add("yakuhai", 1)
         if t == ctx.round_wind:
-            yaku.append("yakuhai (vent de table)")
+            add("yakuhai (vent de table)", 1)
         if t == ctx.seat_wind:
-            yaku.append("yakuhai (vent de siège)")
-    if ctx.closed and not tris and pair not in values:
-        # pinfu : la tuile gagnante doit compléter une attente ryanmen
-        if any((win == s and s % 9 != 6) or (win == s + 2 and s % 9 != 0)
-               for k, s in closed_sets if k == "seq"):
-            yaku.append("pinfu")
-    if ctx.closed and any(seqs.count(s) >= 2 for s in set(seqs)):
-        yaku.append("iipeiko")
+            add("yakuhai (vent de siège)", 1)
+    pinfu = (closed and not tris and pair not in values and slot >= 0
+             and _is_ryanmen(closed_sets[slot][1], win))
+    if pinfu:
+        add("pinfu", 1)
+    if closed:
+        doubles = sum(seqs.count(s) // 2 for s in set(seqs))
+        if doubles >= 2:
+            add("ryanpeikou", 3)
+        elif doubles == 1:
+            add("iipeiko", 1)
     if any(all(n + 9 * suit in seqs for suit in range(3)) for n in range(7)):
-        yaku.append("sanshoku")
+        add("sanshoku", 2, 1)
+    if any(all(n + 9 * suit in tris for suit in range(3)) for n in range(9)):
+        add("sanshoku doukou", 2)
     if any(all(9 * suit + n in seqs for n in (0, 3, 6)) for suit in range(3)):
-        yaku.append("ittsu")
+        add("ittsu", 2, 1)
     if len(tris) == 4:
-        yaku.append("toitoi")
+        add("toitoi", 2)
+    if concealed == 3:
+        add("sanankou", 2)
+    if kans == 3:
+        add("sankantsu", 2)
     groups = [_tiles_of(s) for s in sets] + [[pair]]
+    flat = [t for g in groups for t in g]
+    if all(_is_terminal_or_honor(t) for t in flat):
+        if not seqs:
+            add("honroutou", 2)
     if seqs and all(any(_is_terminal_or_honor(t) for t in g) for g in groups):
-        flat = [t for g in groups for t in g]
-        yaku.append("junchan" if all(t < 27 for t in flat) else "chanta")
-    return yaku
+        if all(t < 27 for t in flat):
+            add("junchan", 3, 2)
+        else:
+            add("chanta", 2, 1)
+    dragons = sum(1 for t in tris if t in DRAGONS)
+    if dragons == 2 and pair in DRAGONS:
+        add("shousangen", 2)
+    # Yakuman liés à la lecture.
+    if dragons == 3:
+        add("daisangen (yakuman)", YAKUMAN)
+    if concealed == 4:
+        add("suuankou (yakuman)", YAKUMAN)
+    if kans == 4:
+        add("suukantsu (yakuman)", YAKUMAN)
+    winds = sum(1 for t in tris if t in WINDS)
+    if winds == 4:
+        add("daisuushii (yakuman)", YAKUMAN)
+    elif winds == 3 and pair in WINDS:
+        add("shousuushii (yakuman)", YAKUMAN)
+    return yaku, _fu(pair, closed_sets, slot, win, ctx, pinfu, ron_tri)
+
+
+def _fu(pair: int, closed_sets: list[Set], slot: int, win: int, ctx: Context,
+        pinfu: bool, ron_tri: bool) -> int:
+    closed = ctx.closed
+    if pinfu:
+        return 20 if ctx.tsumo else 30
+    fu = 20 + (10 if closed and not ctx.tsumo else 0) + (2 if ctx.tsumo else 0)
+    if pair in DRAGONS:
+        fu += 2
+    fu += 2 * (pair == ctx.round_wind) + 2 * (pair == ctx.seat_wind)
+    for i, (kind, t) in enumerate(closed_sets):
+        if kind == "tri":
+            is_open = ron_tri and i == slot
+            fu += (4 if _is_terminal_or_honor(t) else 2) * (1 if is_open else 2)
+    for g in ctx.calls:
+        kind, t = call_set(g)
+        if kind == "tri":
+            fu += (4 if _is_terminal_or_honor(t) else 2) * (4 if len(g) == 4 else 1)
+    if slot == -1 or (closed_sets[slot][0] == "seq" and not _is_ryanmen(closed_sets[slot][1], win)):
+        fu += 2  # attente tanki, kanchan ou penchan
+    if fu == 20 and not closed:
+        return 30  # main ouverte sans aucun fu : forfait de 30
+    return -(-fu // 10) * 10

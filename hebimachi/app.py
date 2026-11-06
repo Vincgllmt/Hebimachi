@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
+from dataclasses import replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -16,9 +17,11 @@ from .capture import Config, calls_region, crop, enable_dpi_awareness, grab_scre
 from .defense import Opponent
 from .efficiency import estimate_draws_left, simulate_tenpai
 from .games import Game, last_game_id, list_games, save_last_game
+from .goals import Goal
 from .recognition import PromptReader, TileMatcher, WindReader, group_calls
+from .shogi.panel import ShogiPanel
 from .tiles import display_name, format_labels, label_to_index, parse, parse_labels, to_counts
-from .yaku import Context
+from .yaku import Context, next_dora
 
 OPPONENTS = ("Shimocha (droite)", "Toimen (face)", "Kamicha (gauche)")
 WIND_NAMES = ["Est", "Sud", "Ouest", "Nord"]
@@ -176,8 +179,8 @@ class LearnDialog(tk.Toplevel):
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("Hebimachi — assistant Riichi Mahjong")
-        root.geometry("1180x760")
+        root.title("Hebimachi")
+        root.geometry("1180x830")
         self.games = list_games()
         last = last_game_id()
         self.loaded_image: np.ndarray | None = None
@@ -193,7 +196,7 @@ class App:
     def _load_game(self, game: Game):
         """Zones, modèles et particularités du jeu choisi."""
         self.game = game
-        self.root.title(f"Hebimachi — assistant Riichi Mahjong — {game.name}")
+        self.root.title(f"Hebimachi — {game.name}")
         self.config = Config.load(game.config_path)
         self.matcher = TileMatcher(game.templates)
         self.winds = WindReader(game.templates)
@@ -210,33 +213,60 @@ class App:
         monitors = list_monitors()
         self.monitor_var.set(monitors[min(self.config.monitor, len(monitors)) - 1])
         self.last_image = None
+        self.shogi.reload()
         self.status(f"Jeu : {game.name}"
                     + ("" if self.config.hand else " — zones à définir (« Zones… »)."))
 
     # ---------- construction de l'interface ----------
     def _build(self):
-        bar = ttk.Frame(self.root, padding=6)
-        bar.pack(fill="x")
+        # Le jeu et l'écran valent pour tous les modes ; chaque mode a son onglet.
+        top = ttk.Frame(self.root, padding=(6, 6, 6, 0))
+        top.pack(fill="x")
         self.game_var = tk.StringVar(value=self.game.name)
-        game_box = ttk.Combobox(bar, textvariable=self.game_var, values=[g.name for g in self.games],
+        game_box = ttk.Combobox(top, textvariable=self.game_var, values=[g.name for g in self.games],
                                 state="readonly", width=24)
         game_box.pack(side="left", padx=(0, 6))
         game_box.bind("<<ComboboxSelected>>", lambda _e: self.set_game(self.games[game_box.current()]))
-        ttk.Button(bar, text="📷 Capturer", command=self.capture).pack(side="left")
-        ttk.Checkbutton(bar, text="Auto", variable=self.auto, command=self._auto_loop).pack(side="left", padx=6)
-        ttk.Button(bar, text="Ouvrir une image…", command=self.open_image).pack(side="left")
-        ttk.Button(bar, text="Écran en direct", command=self.use_live).pack(side="left", padx=4)
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
         monitors = list_monitors()
         self.monitor_var = tk.StringVar(value=monitors[min(self.config.monitor, len(monitors)) - 1])
-        box = ttk.Combobox(bar, textvariable=self.monitor_var, values=monitors, state="readonly", width=34)
+        box = ttk.Combobox(top, textvariable=self.monitor_var, values=monitors, state="readonly", width=34)
         box.pack(side="left", padx=(0, 6))
         box.bind("<<ComboboxSelected>>", lambda _e: self.set_monitor(box.current() + 1))
+        ttk.Button(top, text="Ouvrir une image…", command=self.open_image).pack(side="left")
+        ttk.Button(top, text="Écran en direct", command=self.use_live).pack(side="left", padx=4)
+
+        self.tabs = ttk.Notebook(self.root)
+        self.tabs.pack(fill="both", expand=True, padx=2, pady=(4, 0))
+        self.mahjong = ttk.Frame(self.tabs)
+        self.tabs.add(self.mahjong, text="Mahjong")
+        self.shogi = ShogiPanel(self.tabs, self)
+        self.tabs.add(self.shogi, text="Shogi")
+        self._build_mahjong(self.mahjong)
+        self.status_var = tk.StringVar()
+        ttk.Label(self.mahjong, textvariable=self.status_var, relief="sunken", padding=4).pack(fill="x", side="bottom")
+
+    def current_tab(self):
+        return self.root.nametowidget(self.tabs.select())
+
+    def _build_mahjong(self, page: ttk.Frame):
+        bar = ttk.Frame(page, padding=6)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="📷 Capturer", command=self.capture).pack(side="left")
+        ttk.Checkbutton(bar, text="Auto", variable=self.auto, command=self._auto_loop).pack(side="left", padx=6)
         ttk.Button(bar, text="Zones…", command=self.calibrate).pack(side="left")
         ttk.Button(bar, text="Apprendre les tuiles…", command=lambda: LearnDialog(self)).pack(side="left", padx=4)
+        # Objectifs optionnels et indépendants : sans case cochée, on gagne au plus vite.
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Label(bar, text="Objectif :").pack(side="left", padx=(0, 4))
+        self.goal_mangan = tk.BooleanVar()
+        self.goal_haneman = tk.BooleanVar()
+        self.goal_ittsu = tk.BooleanVar()
+        for text, var in (("Mangan", self.goal_mangan), ("Haneman", self.goal_haneman),
+                          ("Full straight", self.goal_ittsu)):
+            ttk.Checkbutton(bar, text=text, variable=var, command=self._goal_changed).pack(side="left", padx=3)
 
         # Bandeau du conseil : ce qu'il faut jouer, en gros, sur l'image de la main.
-        panel = tk.Frame(self.root, bg=PANEL_BG, padx=12, pady=8)
+        panel = tk.Frame(page, bg=PANEL_BG, padx=12, pady=8)
         panel.pack(fill="x", padx=6, pady=(0, 6))
         self.advice_var = tk.StringVar(value="En attente d'une main…")
         title = tk.Label(panel, textvariable=self.advice_var, bg=PANEL_BG, fg="white",
@@ -251,7 +281,7 @@ class App:
         self.panel_widgets = [panel, title, detail, self.hand_canvas]
         self.tile_photos: list[ImageTk.PhotoImage] = []
 
-        form = ttk.LabelFrame(self.root, text="Situation (corrigez au besoin — notation 123m406p77z)", padding=8)
+        form = ttk.LabelFrame(page, text="Situation (corrigez au besoin — notation 123m406p77z)", padding=8)
         form.pack(fill="x", padx=6)
         self.vars: dict[str, tk.StringVar] = {}
 
@@ -297,23 +327,20 @@ class App:
         form.columnconfigure(3, weight=1)
 
         self.summary = tk.StringVar(value="—")
-        ttk.Label(self.root, textvariable=self.summary, padding=(8, 6), font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(page, textvariable=self.summary, padding=(8, 6), font=("Segoe UI", 11, "bold")).pack(anchor="w")
         self.explain = tk.StringVar()
-        ttk.Label(self.root, textvariable=self.explain, padding=(8, 0), wraplength=1100).pack(anchor="w")
+        ttk.Label(page, textvariable=self.explain, padding=(8, 0), wraplength=1100).pack(anchor="w")
 
-        cols = ("rank", "discard", "shanten", "accept", "n", "pnext", "pwithin", "ptenpai", "danger", "why")
+        cols = ("rank", "discard", "shanten", "accept", "n", "pnext", "pwithin", "ptenpai", "danger", "goal", "why")
         heads = ("#", "Défausse", "Shanten", "Tuiles acceptées", "Ukeire", "P(pioche)",
-                 "P(avance)", "P(tenpai) MC", "Danger", "Défense")
-        widths = (30, 70, 60, 260, 55, 75, 75, 90, 65, 330)
-        self.tree = ttk.Treeview(self.root, columns=cols, show="headings", height=8)
+                 "P(avance)", "P(tenpai) MC", "Danger", "Objectif", "Défense")
+        widths = (30, 70, 60, 230, 55, 75, 75, 90, 65, 220, 150)
+        self.tree = ttk.Treeview(page, columns=cols, show="headings", height=8)
         for c, h, w in zip(cols, heads, widths):
             self.tree.heading(c, text=h)
             self.tree.column(c, width=w, anchor="w" if c in ("accept", "why") else "center")
         self.tree.tag_configure("best", background="#d9f2dc")
         self.tree.pack(fill="both", expand=True, padx=6, pady=6)
-
-        self.status_var = tk.StringVar()
-        ttk.Label(self.root, textvariable=self.status_var, relief="sunken", padding=4).pack(fill="x", side="bottom")
 
     def status(self, text: str):
         self.status_var.set(text)
@@ -344,6 +371,7 @@ class App:
         # Les zones sont relatives à l'écran : elles ne valent plus rien sur un autre écran.
         self.config.hand = self.config.dora = self.config.calls = None
         self.config.rivers = {}
+        self.config.extra.pop("shogi_board", None)
         self.config.save(self.game.config_path)
         self.last_image = None
         self.status(f"Écran {index} sélectionné : redéfinissez les zones (« Zones… »).")
@@ -465,15 +493,30 @@ class App:
 
     def _auto_loop(self):
         if self.auto.get():
-            try:
-                self.capture()
-            except Exception as exc:  # la boucle ne doit pas mourir sur une capture ratée
-                self.status(f"Erreur de capture : {exc}")
+            if self.current_tab() is self.mahjong:
+                try:
+                    self.capture()
+                except Exception as exc:  # la boucle ne doit pas mourir sur une capture ratée
+                    self.status(f"Erreur de capture : {exc}")
             self.root.after(AUTO_INTERVAL_MS, self._auto_loop)
 
     # ---------- analyse ----------
     def _tiles(self, key: str) -> list[int]:
         return parse(self.vars[key].get())
+
+    def _goal_changed(self):
+        if self.vars["hand"].get().strip():
+            self.analyze()
+
+    def _goal(self) -> Goal:
+        """Objectif coché : le haneman, plus exigeant, englobe le mangan."""
+        limit = "haneman" if self.goal_haneman.get() else "mangan" if self.goal_mangan.get() else ""
+        return Goal(limit, self.goal_ittsu.get())
+
+    def _red_fives(self) -> list[int]:
+        """Tuiles dont nous tenons le cinq rouge (main et appels)."""
+        labels = parse_labels(self.vars["hand"].get()) + parse_labels(self.vars["calls"].get())
+        return [label_to_index(lb) for lb in labels if lb[0] == "0"]
 
     def analyze(self):
         try:
@@ -490,8 +533,10 @@ class App:
             total_discards = len(mine) + sum(len(o.discards) for o in opponents)
             draws_left = estimate_draws_left(total_discards)
             ctx = Context(27 + WIND_NAMES.index(self.round_var.get()), 27 + WIND_NAMES.index(self.seat_var.get()),
-                          self.my_riichi.get(), calls=[parse(g) for g in calls_groups])
-            adv = advise(hand, visible, opponents, melds, draws_left, calls, ctx.value_honors())
+                          self.my_riichi.get(), calls=[parse(g) for g in calls_groups],
+                          dora=[next_dora(t) for t in self._tiles("dora")], aka=self._red_fives(),
+                          goal=self._goal())
+            adv = advise(hand, visible, opponents, melds, draws_left, calls, ctx.value_honors(), ctx)
             actions = self._actions(hand, ctx, visible, mine, draws_left, sum(o.riichi for o in opponents), adv)
         except ValueError as exc:
             self.summary.set(f"Erreur : {exc}")
@@ -513,7 +558,9 @@ class App:
             if offer:
                 tile = offer[-1]
                 out["offer"] = tile
-                out["ron"] = check_ron(hand, tile, ctx, mine)
+                red = parse_labels(self.vars["offer"].get())[-1][0] == "0"
+                ron_ctx = replace(ctx, aka=ctx.aka + [tile]) if red else ctx
+                out["ron"] = check_ron(hand, tile, ron_ctx, mine)
                 out["calls"] = check_calls(hand, tile, self.offer_from.get() == SEAT_NAMES["kamicha"],
                                            ctx, visible, draws_left, threats)
             return out
@@ -574,8 +621,11 @@ class App:
         return "  •  ".join(titles), "\n".join(lines[:8])
 
     def _advice_text(self, adv: Advice, actions: dict | None = None) -> tuple[str, str]:
+        title, detail = self._main_advice(adv, actions or {})
+        return title, f"{adv.goal_note}\n{detail}" if adv.goal_note else detail
+
+    def _main_advice(self, adv: Advice, actions: dict) -> tuple[str, str]:
         a, best = adv.analysis, adv.ranked[0]
-        actions = actions or {}
 
         def tiles_list(c) -> str:
             return ", ".join(display_name(t) for t in sorted(c.ukeire))
@@ -584,7 +634,9 @@ class App:
         if action:
             return action
         tsumo = actions.get("tsumo")
-        if a.shanten == -1:
+        # Victoire trop faible pour l'objectif : on continue la main, le conseil de défausse s'applique.
+        refused = tsumo is not None and not tsumo.recommend and self._goal().active
+        if a.shanten == -1 and not refused:
             reason = tsumo.reason if tsumo else "Déclarez la victoire (si vous avez un yaku)."
             return ("Main complète, mais pas de tsumo possible" if tsumo else "TSUMO ! Main complète"), reason
         if self.my_riichi.get() and "drawn" in actions:
@@ -624,6 +676,8 @@ class App:
             detail += f"  Autres bons choix : {', '.join(others)}."
         if adv.warning:
             detail = f"⚠ {adv.warning}\n{detail}"
+        if refused:
+            detail = f"{tsumo.reason}\n{detail}"
         return title, detail + self._kan_note(actions)
 
     @staticmethod
@@ -718,7 +772,7 @@ class App:
                 c.shanten, accept, c.total,
                 f"{c.p_next:.0%}", f"{c.p_within:.0%}",
                 "…" if 1 <= c.shanten <= 4 and i < 6 else "",
-                f"{d:.1f} %" if d is not None else "", why))
+                f"{d:.1f} %" if d is not None else "", _goal_cell(c), why))
             rows[iid] = c
 
         # Monte Carlo en tâche de fond sur les meilleures options.
@@ -746,6 +800,13 @@ class App:
             self.tree.set(iid, "ptenpai", f"{p:.0%}")
 
 
+def _goal_cell(c) -> str:
+    """Colonne Objectif : distance à l'objectif et plan visé par cette défausse."""
+    if c.goal is None:
+        return ""
+    return f"{c.goal.shanten} · {c.goal.plan}"
+
+
 def main():
     enable_dpi_awareness()
     root = tk.Tk()
@@ -753,5 +814,11 @@ def main():
         ttk.Style(root).theme_use("vista")
     except tk.TclError:
         pass
-    App(root)
+    app = App(root)
+
+    def close():
+        app.shogi.close()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", close)
     root.mainloop()
