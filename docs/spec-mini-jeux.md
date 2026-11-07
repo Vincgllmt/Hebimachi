@@ -13,7 +13,7 @@ au jeu ni à la manette.
 |------------|--------------------------|-------------------------------------------------------|----------|
 | Koi-koi    | Oui                      | Beaucoup : carte à jouer, koi-koi ou arrêt            | 1        |
 | Oicho-kabu | Oui                      | Moyen : tirer ou non, selon les cartes vues           | 2        |
-| Billard    | Partiellement, à prouver | Aide à la visée, sous condition de la vue de la table | 3        |
+| Billard    | Oui (Kiwami : vue fixe)  | Dire si la visée affichée empoche la bille            | 3        |
 
 Les règles, les barèmes et l'affichage changent d'un jeu de la série à l'autre. Chaque jeu garde
 donc ses particularités dans `data/games/<id>/`, et les chiffres de ce document sont à vérifier
@@ -75,11 +75,30 @@ vérifié sur 10 mains réelles relevées à la main.
 
 ## Billard — priorité 3
 
-**À prouver d'abord.** Tout dépend de la vue. En vue de dessus, c'est de la géométrie ; avec une
-caméra 3D derrière la queue, il faut redresser la table par ses 4 coins, comme le plateau de shogi,
-et rien ne garantit que les coins soient visibles. Sans capture, on ne peut pas trancher.
+**Ce que montre Kiwami** (captures `img.png`, `img_1.png`, `screen.png`, 1920×1080, mode rotation) :
 
-**Détection.** Redressement de la table, puis billes par `HoughCircles` et couleur.
+- **Vue de dessus, caméra fixe.** On vise dans cette vue ; seul le réglage de la puissance passe
+  dans une autre vue, où la visée est figée. Pas de redressement : le tapis (≈ x 220–1700,
+  y 170–905), les 6 poches et le rayon des billes (≈ 16 px) se calibrent une fois pour toutes.
+- **Le jeu trace la trajectoire de la blanche** en pointillés jusqu'à la première bille touchée, en
+  suivant un éventuel rebond sur la bande. Au bout, il dessine une **bille fantôme** blanche
+  translucide, contre la bille visée. Il n'indique pas où part la bille visée : c'est le manque
+  que l'outil comble.
+- **HUD du mode rotation** : billes empochées en haut à gauche, **« NEXT » = bille à toucher en
+  premier** (la plus petite restante), scores des deux joueurs en bas. Le HUD masque la poche
+  haut-gauche ; sa position est connue par calibration.
+- Overlay Discord éventuel à gauche, sur la bande : zone à ignorer.
+
+**Détection.** Billes par `HoughCircles` dans le tapis, identifiées par couleur et par
+pleine/rayée (les numéros sont souvent illisibles). Le HUD réduit l'ambiguïté : les billes empochées
+n'y sont plus, il reste au plus une pleine et une rayée par couleur. Bille fantôme : au bout des
+pointillés, disque clair sans ombre ni dégradé, ce qui la distingue de la blanche.
+
+**Conseil de base.** La bille visée part sur la droite allant du centre du fantôme à son centre. On
+la prolonge : poche atteinte sans autre bille sur le chemin, ou non. On le signale aussi quand la
+première bille touchée n'est pas la « NEXT » (faute en rotation). Exemple `img_1.png` : le fantôme
+touche le 6, qui partirait vers la bande du bas à gauche de la poche du milieu, et le coup est une
+faute puisque NEXT = 5. L'effet de « throw » (légère déviation par frottement) reste à mesurer.
 
 **Calculs.** Bille fantôme : pour envoyer une bille `O` vers un point `T`, la blanche doit arriver au
 contact en `G = O − 2R · (T − O)/|T − O|`.
@@ -93,19 +112,40 @@ contact en `G = O − 2R · (T − O)/|T − O|`.
   environ si elle roule. Le résultat dépend donc de l'effet, et l'outil doit donner une zone plutôt
   qu'une ligne.
 
-**Limite principale.** L'outil calcule un angle, mais le joueur vise à la manette, sans repère à
-l'écran. Il faut soit une surimpression au-dessus du jeu (fenêtre transparente, ce qui suppose le
-mode fenêtré sans bordure), soit traduire le conseil en repère visible dans le jeu, comme la ligne
-de visée qu'il affiche peut-être. La physique du jeu (effet, frottement, rebonds) n'est pas connue
-et devra être mesurée.
+**Plus besoin de surimpression.** Le joueur voit déjà le fantôme dans le jeu. L'outil dit si la
+visée actuelle empoche la bille, et peut indiquer où placer le fantôme pour le meilleur coup. La
+physique de la blanche après le choc (effet, frottement) n'est utile que pour le placement suivant,
+en second temps.
 
-**Plan en deux temps.** D'abord un prototype qui lit une capture et trace la ligne sur l'image,
-pour valider la détection. La surimpression seulement si ce prototype tient.
+**Plan.** Prototype hors ligne : lire une capture, détecter tapis, billes, fantôme et NEXT, tracer
+la trajectoire de la bille visée sur l'image avec un verdict. Ensuite seulement, onglet en direct
+et recherche du meilleur coup (combination, carom).
+
+**État : prototype fait** (`hebimachi/billiards/`, `python -m hebimachi.billiards capture.png`,
+tests dans `tests/test_billiards.py`). Sur les 3 captures : 11 billes sur 11 lues avec couleur et
+motif, centres stables à 1 px près d'une capture à l'autre, fantôme, pointillés et NEXT lus.
+Le HUD peut être caché : la lecture des billes n'en dépend pas, seul le contrôle de faute
+(NEXT) disparaît. Reste à valider en jeu le critère des 7 coups sur 10, et à régler les
+mâchoires (`jaw_margin`) et l'angle limite des poches du milieu sur des coups réels.
+
+**Recherche de coups** (`sim.py`, `search.py`, onglet Billard → « Chercher un coup ») : on balaie
+les directions qui touchent une bille autorisée (pas de 0,02°), plus un tour complet avec la blanche
+par la bande pour atteindre une NEXT cachée. Chaque direction est simulée : ligne droite, bande en
+miroir, choc selon la règle des 90° (frappée sur la ligne des centres, frappeuse sur la tangente),
+élan partagé en cos²/sin² et réduit à chaque bande. Les directions voisines de même résultat
+forment un coup ; leur plage donne la **marge**, en pixels de déplacement du fantôme. Types :
+direct, combinaison (la bille empochée a été frappée par une autre que la blanche), carambolage
+(elle a ricoché sur une bille, ou la blanche l'a touchée après avoir dévié sur une première), bande.
+Le coup choisi s'affiche avec le fantôme à reproduire ; en Auto, l'onglet dit de combien décaler
+le fantôme du jeu. Limites : pas d'effet ni de frottement, billes en mouvement qui ne se croisent
+pas, élan de frappe fixe (`DEFAULT_POWER`). La règle des 90° vaut pour une bille qui glisse : à
+vérifier en jeu, surtout pour les carambolages de la blanche.
 
 **Critères d'acceptation du prototype.** Billes localisées à moins d'un demi-rayon sur 20 captures ;
 coups conseillés réussis sur au moins 7 essais sur 10 en jeu, à la main.
 
-**Taille :** grande, risque élevé.
+**Taille :** moyenne pour le prototype (risque levé par la vue fixe), grande pour la recherche de
+coups.
 
 ## Ce qu'il faut pour démarrer
 
