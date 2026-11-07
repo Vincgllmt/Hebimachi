@@ -19,6 +19,7 @@ from .efficiency import estimate_draws_left, simulate_tenpai
 from .games import Game, last_game_id, list_games, save_last_game
 from .goals import Goal
 from .recognition import PromptReader, TileMatcher, WindReader, group_calls
+from .billiards.panel import BilliardsPanel
 from .shogi.panel import ShogiPanel
 from .tiles import display_name, format_labels, label_to_index, parse, parse_labels, to_counts
 from .yaku import Context, next_dora
@@ -214,6 +215,7 @@ class App:
         self.monitor_var.set(monitors[min(self.config.monitor, len(monitors)) - 1])
         self.last_image = None
         self.shogi.reload()
+        self.billiards.reload()
         self.status(f"Jeu : {game.name}"
                     + ("" if self.config.hand else " — zones à définir (« Zones… »)."))
 
@@ -241,6 +243,8 @@ class App:
         self.tabs.add(self.mahjong, text="Mahjong")
         self.shogi = ShogiPanel(self.tabs, self)
         self.tabs.add(self.shogi, text="Shogi")
+        self.billiards = BilliardsPanel(self.tabs, self)
+        self.tabs.add(self.billiards, text="Billard")
         self._build_mahjong(self.mahjong)
         self.status_var = tk.StringVar()
         ttk.Label(self.mahjong, textvariable=self.status_var, relief="sunken", padding=4).pack(fill="x", side="bottom")
@@ -358,7 +362,9 @@ class App:
         if path:
             self.loaded_image = cv2.imdecode(np.fromfile(path, np.uint8), cv2.IMREAD_COLOR)
             self.status(f"Image chargée : {path}")
-            self.capture()
+            tab = self.current_tab()
+            # l'image est lue par l'onglet affiché (mahjong par défaut)
+            (tab.capture if tab is self.billiards else self.capture)()
 
     def use_live(self):
         self.loaded_image = None

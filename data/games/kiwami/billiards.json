@@ -1,0 +1,13 @@
+{
+  "screen": [1920, 1080],
+  "cushions": {"left": 218, "top": 172, "right": 1702, "bottom": 908},
+  "ball_radius": 16.5,
+  "corner_mouth": 48,
+  "side_mouth": 42,
+  "jaw_margin": 0.6,
+  "side_max_angle": 55,
+  "hud": {
+    "tray": [100, 66, 720, 186],
+    "next_icon": [823, 107, 22]
+  }
+}
