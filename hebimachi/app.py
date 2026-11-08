@@ -11,7 +11,8 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-from .actions import check_calls, check_closed_kan, check_riichi, check_ron, check_tsumo, evaluate_prompt
+from .actions import (check_calls, check_closed_kan, check_riichi, check_ron, check_tsumo, evaluate_prompt,
+                      infer_call)
 from .advisor import Advice, advise
 from .capture import Config, calls_region, crop, enable_dpi_awareness, grab_screen, list_monitors
 from .defense import Opponent
@@ -190,7 +191,7 @@ class App:
         self.generation = 0
         self._load_game(next((g for g in self.games if g.id == last), self.games[0]))
         self._build()
-        if not self.config.hand:
+        if not self.config.hand and not self.game.zones:
             self.status("Première utilisation : « Zones… » puis « Apprendre les tuiles… ». "
                         "Vous pouvez aussi saisir la main à la main et cliquer sur Analyser.")
 
@@ -199,12 +200,14 @@ class App:
         self.game = game
         self.root.title(f"Hebimachi — {game.name}")
         self.config = Config.load(game.config_path)
-        self.matcher = TileMatcher(game.templates)
+        self.matcher = TileMatcher(game.templates, game.reference_templates)
         self.winds = WindReader(game.templates)
         self.prompts = PromptReader(game.templates)
         self.prompt: list[str] = []      # actions proposées par le jeu en ce moment
         self.prompt_shown = False
         self.prev_rivers: dict[str, list[str]] = {}
+        self.hand13: list[str] | None = None   # dernière main lue hors de notre tour
+        self.inferred: list[list[str]] = []    # appels déduits de la main (écran sans appels lisibles)
 
     def set_game(self, game: Game):
         if game.id == self.game.id:
@@ -217,7 +220,7 @@ class App:
         self.shogi.reload()
         self.billiards.reload()
         self.status(f"Jeu : {game.name}"
-                    + ("" if self.config.hand else " — zones à définir (« Zones… »)."))
+                    + ("" if self.config.hand or self.game.zones else " — zones à définir (« Zones… »)."))
 
     # ---------- construction de l'interface ----------
     def _build(self):
@@ -380,7 +383,8 @@ class App:
         self.config.extra.pop("shogi_board", None)
         self.config.save(self.game.config_path)
         self.last_image = None
-        self.status(f"Écran {index} sélectionné : redéfinissez les zones (« Zones… »).")
+        self.status(f"Écran {index} sélectionné : " + ("zones par défaut réappliquées à la prochaine capture."
+                                                      if self.game.zones else "redéfinissez les zones (« Zones… »)."))
 
     def calibrate(self):
         img = self.current_image(force_grab=True)
@@ -416,22 +420,38 @@ class App:
             d.x += x0  # coordonnées écran
         return dets or None
 
+    def _default_zones(self, img: np.ndarray) -> None:
+        """Zones manquantes remplies avec celles du jeu (game.json), à la taille de l'écran."""
+        if self.config.apply_defaults(self.game.zones, img.shape[1], img.shape[0]):
+            self.config.save(self.game.config_path)
+            self.status(f"Zones par défaut de {self.game.name} appliquées (modifiables avec « Zones… »).")
+
     def capture(self):
+        img = self.current_image(force_grab=True)
+        if img is not None:
+            self._default_zones(img)
         if not self.config.hand:
             self.status("Définissez d'abord les zones (bouton « Zones… »).")
             return
+        hand_img = crop(img, self.config.hand)
+        before_missing = set(self.matcher.missing()) | self.matcher.weak
+        learned = self.matcher.auto_learn(hand_img) if hand_img is not None else []
         if not self.matcher.templates:
             self.status("Aucun modèle de tuile : utilisez « Apprendre les tuiles… ».")
             return
-        img = self.current_image(force_grab=True)
-        hand_img = crop(img, self.config.hand)
         dets = self.matcher.detect(hand_img, threshold=self.config.threshold) if hand_img is not None else []
         calls = self._read_calls(img, dets)
         if calls is not None:
             # Les tuiles appelées ne font pas partie de la main, même si les zones se chevauchent.
             left = min(d.x for d in calls)
             dets = [d for d in dets if self.config.hand[0] + d.x + d.w <= left]
-        groups = group_calls(calls) if calls else []
+        groups = [[d.label for d in g] for g in group_calls(calls)] if calls else []
+        labels = [d.label for d in dets]
+        note = ""
+        if groups:
+            self.inferred = []
+        else:
+            groups, note = self._inferred_calls(labels)
         melds = len(groups)
         worst = min((d.score for d in dets), default=0.0)
         if len(dets) + 3 * melds not in (13, 14) or worst < HAND_THRESHOLD:
@@ -440,8 +460,10 @@ class App:
                         "animation ou fenêtre masquée ? Dernière analyse conservée.")
             return
         before = {k: v.get() for k, v in self.vars.items()}
-        self.vars["hand"].set(format_labels([d.label for d in dets]))
-        self.vars["calls"].set(" ".join(format_labels([d.label for d in g]) for g in groups))
+        self.vars["hand"].set(format_labels(labels))
+        self.vars["calls"].set(" ".join(format_labels(g) for g in groups))
+        if len(dets) + 3 * melds == 13:
+            self.hand13 = labels
         dora_img = crop(img, self.config.dora)
         if dora_img is not None:
             self.vars["dora"].set(format_labels([d.label for d in self.matcher.read_tiles(dora_img)]))
@@ -470,9 +492,48 @@ class App:
                    or (self.prompt_shown, self.prompt) != prompt_before)
         low = [d for d in dets if d.score < self.config.threshold + 0.08]
         self.status(f"{len(dets)} tuiles reconnues en main" + (f" ({len(low)} incertaines)" if low else "")
-                    + (f" — riichi : {', '.join(riichi_seen)}" if riichi_seen else ""))
+                    + (f" — riichi : {', '.join(riichi_seen)}" if riichi_seen else "")
+                    + self._learn_note(learned, before_missing) + note)
         if changed or not self.auto.get():
             self.analyze()
+
+    def _inferred_calls(self, labels: list[str]) -> tuple[list[list[str]], str]:
+        """Appels déduits quand l'écran n'en montre aucun de lisible.
+
+        Une main de 13 qui perd deux tuiles formant un chi ou un pon avec la dernière défausse
+        adverse vient d'appeler : l'appel est retenu jusqu'à la fin de la donne.
+        """
+        n, known = len(labels), self.inferred
+        if n + 3 * len(known) in (13, 14):
+            return known, ""
+        offer = parse_labels(self.vars["offer"].get())
+        if n + 3 * len(known) in (11, 12) and self.hand13 is not None and offer:
+            tile = offer[-1]
+            used = infer_call([label_to_index(lb) for lb in self.hand13],
+                              [label_to_index(lb) for lb in labels], label_to_index(tile))
+            if used is not None:
+                pool = list(self.hand13)
+                group = []
+                for t in used:
+                    lb = next(lb for lb in pool if label_to_index(lb) == t)
+                    pool.remove(lb)
+                    group.append(lb)
+                group = sorted(group + [tile], key=label_to_index)
+                self.inferred = known + [group]
+                return self.inferred, f" — appel déduit : {format_labels(group)}"
+        if n in (13, 14):  # nouvelle donne
+            self.inferred = []
+        return [], ""
+
+    def _learn_note(self, learned: list[str], before: set[str]) -> str:
+        """Modèles appris tout seul pendant cette capture (main, puis rivières et dora)."""
+        now = set(self.matcher.missing()) | self.matcher.weak
+        new = sorted(set(learned) | (before - now) | (now - before - set(self.matcher.missing())))
+        if not new:
+            return ""
+        miss = len(self.matcher.missing())
+        return (f" — appris : {' '.join(new)} ({miss} manquants)" if miss
+                else f" — appris : {' '.join(new)}, tous les modèles sont connus")
 
     def _update_offer(self, rivers: dict[str, list[str]], hand_size: int):
         """Repère la tuile qu'un adversaire vient de jeter : c'est elle que l'on peut appeler."""

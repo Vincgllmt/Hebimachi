@@ -70,23 +70,49 @@ def group_calls(dets: list[Detection]) -> list[list[Detection]]:
 
 
 class TileMatcher:
-    def __init__(self, template_dir: Path):
+    """Modèles de tuiles d'un jeu.
+
+    `reference` : dossier de modèles d'un autre jeu au dessin proche (ex. Ishin pour Kiwami).
+    Les tuiles qu'il reconnaît sans ambiguïté sont apprises toutes seules (`auto_learn`).
+    """
+
+    def __init__(self, template_dir: Path, reference: Path | None = None):
         self.dir = Path(template_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.templates: dict[str, np.ndarray] = {}
         self.scale_cache: dict[str, float] = {}
+        self.reference = (TileMatcher(reference) if reference is not None
+                          and Path(reference).resolve() != self.dir.resolve() else None)
         self.reload()
 
     @property
     def meta_path(self) -> Path:
         return self.dir / "meta.json"
 
+    def _meta(self) -> dict:
+        try:
+            return json.loads(self.meta_path.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _write_meta(self, **changes) -> None:
+        self.meta_path.write_text(json.dumps({**self._meta(), **changes}))
+
     @property
     def tile_size(self) -> tuple[int, int] | None:
-        if self.meta_path.exists():
-            w, h = json.loads(self.meta_path.read_text())["tile_size"]
-            return w, h
-        return None
+        size = self._meta().get("tile_size")
+        return (size[0], size[1]) if size else None
+
+    @property
+    def weak(self) -> set[str]:
+        """Modèles appris sur une tuile de rivière (petite, redimensionnée) : à remplacer dès
+        que la tuile passe dans la main."""
+        return set(self._meta().get("weak", []))
+
+    def _set_weak(self, label: str, weak: bool) -> None:
+        labels = self.weak
+        if (label in labels) != weak:
+            self._write_meta(weak=sorted(labels ^ {label}))
 
     def reload(self) -> None:
         self.templates = {}
@@ -118,17 +144,23 @@ class TileMatcher:
         size = self.tile_size
         if size is None:
             size = (int(w / n * (1 - 2 * inset)), int(h * (1 - 2 * inset)))
-            self.meta_path.write_text(json.dumps({"tile_size": size}))
+            self._write_meta(tile_size=size)
         tw, th = size
         for i, label in enumerate(labels):
             # Fenêtre de taille fixe centrée sur la case, sans rééchantillonner si possible.
-            cx, cy = w * (i + 0.5) / n, h / 2
-            x0, y0 = int(round(cx - tw / 2)), int(round(cy - th / 2))
-            crop = strip[max(0, y0):y0 + th, max(0, x0):x0 + tw]
-            if crop.shape[1] != tw or crop.shape[0] != th:
-                crop = cv2.resize(crop, size, interpolation=cv2.INTER_AREA)
-            self._save(label, crop, overwrite)
+            crop = self._crop_center(strip, w * (i + 0.5) / n, h / 2)
+            self._save(label, crop, overwrite or label in self.weak)
+            self._set_weak(label, False)
         self.reload()
+
+    def _crop_center(self, image: np.ndarray, cx: float, cy: float) -> np.ndarray:
+        """Fenêtre de la taille des modèles centrée sur (cx, cy), redimensionnée si elle déborde."""
+        tw, th = self.tile_size
+        x0, y0 = int(round(cx - tw / 2)), int(round(cy - th / 2))
+        crop = image[max(0, y0):y0 + th, max(0, x0):x0 + tw]
+        if crop.shape[1] != tw or crop.shape[0] != th:
+            crop = cv2.resize(crop, (tw, th), interpolation=cv2.INTER_AREA)
+        return crop
 
     def learn_tile(self, tile: np.ndarray, label: str, overwrite: bool = False,
                    inset: float = 0.04) -> None:
@@ -142,6 +174,132 @@ class TileMatcher:
         tile = tile[dy:h - dy, dx:w - dx]
         self._save(label, cv2.resize(tile, size, interpolation=cv2.INTER_CUBIC), overwrite)
         self.reload()
+
+    # ---------- apprentissage automatique (modèles d'un jeu proche) ----------
+    @staticmethod
+    def _ranking(roi: np.ndarray, templates: dict[str, np.ndarray],
+                 size: tuple[int, int]) -> list[tuple[float, str]]:
+        """Scores de chaque modèle, ramené à `size`, sur la zone `roi` ; meilleur en premier."""
+        out = []
+        for label, tpl in templates.items():
+            t = cv2.resize(tpl, size, interpolation=cv2.INTER_AREA)
+            if roi.shape[0] >= t.shape[0] and roi.shape[1] >= t.shape[1]:
+                out.append((float(cv2.matchTemplate(roi, t, cv2.TM_CCOEFF_NORMED).max()), label))
+        return sorted(out, reverse=True)
+
+    def _sure(self, roi: np.ndarray, size: tuple[int, int], min_score: float,
+              margin: float) -> str | None:
+        """Étiquette de la tuile selon le jeu de référence, si elle est sans ambiguïté et
+        qu'aucun modèle déjà appris (fiable) ne la reconnaît comme une autre tuile."""
+        ranked = self._ranking(roi, self.reference.templates, size)
+        if not ranked or ranked[0][0] < min_score:
+            return None
+        if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < margin:
+            return None
+        label = ranked[0][1]
+        trusted = {lb: t for lb, t in self.templates.items() if lb not in self.weak and lb != label}
+        own = self._ranking(roi, trusted, size)
+        if own and own[0][0] >= 0.9:
+            return None
+        return label
+
+    def auto_learn(self, hand: np.ndarray, min_score: float = 0.75, margin: float = 0.1) -> list[str]:
+        """Apprend les modèles manquants (ou faibles) à partir de la zone de la main.
+
+        Les tuiles sont repérées avec les modèles du jeu de référence ; une tuile n'est apprise
+        que si la référence la reconnaît nettement. Le dragon blanc, face vide que le template
+        matching ne distingue pas, est repéré comme une case claire et unie entre deux tuiles.
+        """
+        ref = self.reference
+        todo = set(self.missing()) | self.weak
+        if ref is None or not ref.templates or not todo:
+            return []
+        rw, rh = next(iter(ref.templates.values())).shape[1::-1]
+        if self.tile_size is None:
+            dets = ref.detect_multiscale(hand, scales=tuple(s / 100 for s in range(50, 151, 5)),
+                                         threshold=min_score)
+            if len(dets) < 3:
+                return []
+            w = int(np.median([d.w for d in dets]))
+            self._write_meta(tile_size=(w, int(round(w * rh / rw))))
+        tw, th = self.tile_size
+        dets = ref.detect(hand, tw / rw, threshold=min_score)
+        learned: list[str] = []
+        for d in sorted(dets, key=lambda d: -d.score):
+            if d.label not in todo or d.label in learned:
+                continue
+            pad = max(2, d.w // 10)
+            roi = hand[max(0, d.y - pad):d.y + d.h + pad, max(0, d.x - pad):d.x + d.w + pad]
+            if self._sure(roi, (d.w, d.h), min_score, margin) != d.label:
+                continue
+            self._save(d.label, self._crop_center(hand, d.x + d.w / 2, d.y + d.h / 2), True)
+            self._set_weak(d.label, False)
+            learned.append(d.label)
+        if "5z" in todo:
+            known = dets + (self.detect(hand, threshold=0.85) if self.templates else [])
+            blank = self._find_blank(hand, known)
+            if blank is not None:
+                self._save("5z", self._crop_center(hand, *blank), True)
+                self._set_weak("5z", False)
+                learned.append("5z")
+        if learned:
+            self.reload()
+        return learned
+
+    def _find_blank(self, hand: np.ndarray, dets: list[Detection]) -> tuple[float, float] | None:
+        """Centre d'une case vide (face claire et unie) entre deux tuiles reconnues de la main."""
+        if len(dets) < 2:
+            return None
+        dets = sorted(dets, key=lambda d: d.x)
+        pitch = float(np.median([b.x - a.x for a, b in zip(dets, dets[1:])]))
+        tw, th = self.tile_size
+        hsv = cv2.cvtColor(hand, cv2.COLOR_BGR2HSV)
+        for a, b in zip(dets, dets[1:]):
+            if not 1.6 * pitch < b.x - a.x < 2.4 * pitch:
+                continue  # pas exactement une case libre entre les deux
+            cx, cy = (a.x + b.x + a.w) / 2, a.y + a.h / 2
+            x0, x1 = int(cx - 0.3 * tw), int(cx + 0.3 * tw)
+            y0, y1 = int(cy - 0.3 * th), int(cy + 0.3 * th)
+            face = hsv[max(0, y0):y1, max(0, x0):x1]
+            if (face.size and face[:, :, 2].mean() > 170 and face[:, :, 1].mean() < 70
+                    and face[:, :, 2].std() < 12):
+                return cx, cy
+        return None
+
+    def _reference_label(self, tile: np.ndarray, min_score: float = 0.6,
+                         margin: float = 0.15) -> str | None:
+        """Étiquette d'une tuile isolée debout selon la référence, si elle est sans ambiguïté."""
+        if self.reference is None or self.tile_size is None:
+            return None
+        h, w = tile.shape[:2]
+        pad = max(2, int(0.08 * max(w, h)))
+        roi = cv2.copyMakeBorder(tile, pad, pad, pad, pad, cv2.BORDER_REPLICATE)
+        return self._sure(roi, (int(w * 0.94), int(h * 0.94)), min_score, margin)
+
+    def _learn_weak(self, tile: np.ndarray, label: str) -> bool:
+        """Enregistre un modèle faible, sauf si un modèle fiable existe déjà pour cette tuile."""
+        if label in self.templates and label not in self.weak:
+            return False
+        self.learn_tile(tile, label, overwrite=True)
+        self._set_weak(label, True)
+        return True
+
+    def learn_from_reference(self, tile: np.ndarray) -> str | None:
+        """Tuile isolée (rivière, dora) inconnue : apprise si la référence la reconnaît nettement.
+
+        Le modèle est marqué faible : il sera remplacé quand la tuile apparaîtra dans la main.
+        """
+        label = self._reference_label(tile)
+        return label if label is not None and self._learn_weak(tile, label) else None
+
+    def _classify_sideways(self, sub: np.ndarray) -> tuple[str, float]:
+        """Meilleur modèle pour une tuile couchée, redressée dans un sens ou dans l'autre."""
+        h, w = sub.shape[:2]
+        options = []
+        for rot in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
+            r = cv2.copyMakeBorder(cv2.rotate(sub, rot), 4, 4, 4, 4, cv2.BORDER_REPLICATE)
+            options.append(self.classify(r, (4, 4, h, w)))
+        return max(options, key=lambda o: o[1])
 
     # ---------- détection ----------
     def detect(self, image: np.ndarray, scale: float = 1.0, threshold: float = 0.72,
@@ -221,16 +379,34 @@ class TileMatcher:
                    max_long: float | None = None) -> list[Detection]:
         """Tuiles posées sur le tapis, dans l'ordre de lecture ; les tuiles couchées sont redressées."""
         dets = []
-        for x, y, w, h in tile_boxes(image, max_long=max_long):
-            if w > h:  # tuile couchée : on essaie les deux sens de rotation
+        boxes = tile_boxes(image, max_long=max_long)
+        # Taille habituelle d'une tuile de cette zone : seule une tuile entière est apprise,
+        # jamais un morceau de tuile mal découpé.
+        long_side = float(np.median([max(b[2], b[3]) for b in boxes])) if boxes else 0.0
+        short_side = float(np.median([min(b[2], b[3]) for b in boxes])) if boxes else 0.0
+        for x, y, w, h in boxes:
+            whole = (abs(max(w, h) - long_side) <= 0.1 * long_side
+                     and abs(min(w, h) - short_side) <= 0.1 * short_side)
+            can_learn = self.reference is not None and whole
+            if w > h:  # tuile couchée (riichi) : on essaie les deux sens de rotation
                 sub = image[y:y + h, x:x + w]
-                options = []
-                for rot in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
-                    r = cv2.copyMakeBorder(cv2.rotate(sub, rot), 4, 4, 4, 4, cv2.BORDER_REPLICATE)
-                    options.append(self.classify(r, (4, 4, h, w)))
-                label, score = max(options, key=lambda o: o[1])
+                label, score = self._classify_sideways(sub)
+                if score < threshold and can_learn:
+                    # Apprise seulement si les deux sens ne désignent pas deux tuiles différentes.
+                    found = {}
+                    for rot in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
+                        lb = self._reference_label(cv2.rotate(sub, rot))
+                        if lb is not None:
+                            found.setdefault(lb, rot)
+                    if len(found) == 1:
+                        (lb, rot), = found.items()
+                        if self._learn_weak(cv2.rotate(sub, rot), lb):
+                            label, score = self._classify_sideways(sub)
             else:
                 label, score = self.classify(image, (x, y, w, h))
+                if score < threshold and can_learn:
+                    if self.learn_from_reference(image[y:y + h, x:x + w]) is not None:
+                        label, score = self.classify(image, (x, y, w, h))
             if score >= threshold:
                 dets.append(Detection(x, y, w, h, label, score, sideways=w > h))
         return order_rows(dets)
@@ -244,6 +420,59 @@ class TileMatcher:
         return [d.label for d in dets], riichi
 
 
+def _tile_shaped(box: tuple[int, int, int, int]) -> bool:
+    w, h = box[2], box[3]
+    return min(w, h) >= 8 and 1.15 <= max(w, h) / min(w, h) <= 1.8
+
+
+def _tighten(box: tuple[int, int, int, int], clean: np.ndarray) -> tuple[int, int, int, int]:
+    """Réduit le cadre aux rangées et colonnes qui contiennent vraiment de la face."""
+    x, y, w, h = box
+    face = clean[y:y + h, x:x + w]
+    rows = np.nonzero(face.mean(axis=1) >= 0.15)[0]
+    cols = np.nonzero(face.mean(axis=0) >= 0.15)[0]
+    if not len(rows) or not len(cols):
+        return x, y, 0, 0
+    return (x + int(cols[0]), y + int(rows[0]), int(cols[-1] - cols[0] + 1), int(rows[-1] - rows[0] + 1))
+
+
+def _split_seams(box: tuple[int, int, int, int], clean: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Coupe un bloc de tuiles accolées (rivières de Kiwami) sur la jointure.
+
+    La jointure est une ligne qui traverse toute la face sans un pixel de face nette, au milieu
+    du bloc ; le dessin d'une tuile, lui, ne touche jamais les bords de la face.
+    """
+    x, y, w, h = box
+    face = clean[y:y + h, x:x + w]
+    if face.mean() < 0.5:
+        return [box]  # face terne (tuile grisée, ombre) : la jointure n'y est pas lisible
+    for axis, length in ((0, w), (1, h)):  # colonnes, puis rangées
+        if length < 1.3 * (h if axis == 0 else w):
+            continue  # trop étroit pour contenir deux tuiles côte à côte
+        lines = face.mean(axis=axis)  # part de face nette sur chaque colonne (ou rangée)
+        lo, hi = int(0.3 * length), int(0.7 * length)
+        if hi <= lo:
+            continue
+        cut = lo + int(np.argmin(lines[lo:hi]))
+        if lines[cut] > 0.1:
+            continue
+        seam = face[:, cut] if axis == 0 else face[cut, :]
+        k = max(2, int(0.15 * len(seam)))
+        if np.concatenate([seam[:k], seam[-k:]]).mean() > 0.2:
+            continue  # la ligne s'arrête avant les marges de la face : c'est le dessin d'une tuile
+        a, b = ((x, y, cut, h), (x + cut + 1, y, w - cut - 1, h)) if axis == 0 else \
+               ((x, y, w, cut), (x, y + cut + 1, w, h - cut - 1))
+        # Chaque part est resserrée sur sa face : une tuile couchée (riichi) est moins haute
+        # que ses voisines debout.
+        a, b = _tighten(a, clean), _tighten(b, clean)
+        # Une part peut encore contenir plusieurs tuiles (découpée ensuite) : on n'écarte que les
+        # morceaux trop fins ou trop allongés pour être une tuile, debout ou couchée.
+        if not all(min(p[2], p[3]) >= 8 and max(p[2], p[3]) / min(p[2], p[3]) <= 2.2 for p in (a, b)):
+            continue  # pas deux tuiles : on laisse le bloc tel quel
+        return _split_seams(a, clean) + _split_seams(b, clean)
+    return [box]
+
+
 def tile_boxes(image: np.ndarray, min_area: int = 600,
                max_long: float | None = None) -> list[tuple[int, int, int, int]]:
     """Faces de tuiles (peu saturées) séparées par le tapis vert.
@@ -255,6 +484,7 @@ def tile_boxes(image: np.ndarray, min_area: int = 600,
     low_sat = hsv[:, :, 1] < 70
     bright = (low_sat & (hsv[:, :, 2] > 160)).astype(np.uint8)
     grey = ((hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 25)).astype(np.uint8)
+    clean = (hsv[:, :, 1] < 45) & (hsv[:, :, 2] > 195)  # face nette, sans bord ni ombre
     boxes = []
     for mask, greyed in ((bright, False), (grey, True)):
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5) if greyed else (3, 3), np.uint8))
@@ -262,7 +492,8 @@ def tile_boxes(image: np.ndarray, min_area: int = 600,
         for i in range(1, n):
             if stats[i][4] < min_area or (greyed and bright[labels == i].mean() > 0.3):
                 continue
-            boxes.append(tuple(int(v) for v in stats[i][:4]))
+            box = tuple(int(v) for v in stats[i][:4])
+            boxes.extend(_split_seams(box, clean) if not greyed else [box])
     if max_long is not None:  # ex. appels : plus petits que les tuiles de la main
         boxes = [b for b in boxes if max(b[2], b[3]) <= max_long]
     if not boxes:
@@ -271,7 +502,7 @@ def tile_boxes(image: np.ndarray, min_area: int = 600,
     long_side = float(np.median([max(w, h) for _, _, w, h in boxes]))
     return [b for b in boxes
             if 0.75 * long_side <= max(b[2], b[3]) <= 1.3 * long_side
-            and 1.15 <= max(b[2], b[3]) / min(b[2], b[3]) <= 1.8]
+            and _tile_shaped(b)]
 
 
 # ---------- vents : lettre de notre siège, manche en cours ----------

@@ -1,8 +1,10 @@
 """Jeux pris en charge : chaque jeu a son dossier data/games/<id>/.
 
 Un dossier de jeu contient :
-- game.json : nom affiché et particularités du jeu (voir `Game`) ;
-- config.json : zones de l'écran (propres à chaque machine, non versionnées) ;
+- game.json : nom affiché et particularités du jeu (voir `Game`), dont `reference`, un autre
+  jeu dont les modèles de tuiles servent à apprendre celles-ci tout seul ;
+- config.json : zones de l'écran (propres à chaque machine, non versionnées) ; à défaut, les
+  zones de game.json (`zones`, en fractions de l'écran) s'appliquent à la première capture ;
 - templates/ : modèles de tuiles, lettres de vent et mots des boutons, appris sur ce jeu.
 
 Pour ajouter un jeu, créer son dossier avec un game.json ; il apparaît dans la liste.
@@ -25,6 +27,12 @@ class Game:
     name: str
     dir: Path
     riichi_hint: str = ""  # comment déclarer le riichi quand le jeu ne le propose pas tout seul
+    reference: str = ""    # jeu au dessin de tuiles proche, dont les modèles servent à apprendre seul
+    zones: dict | None = None  # zones par défaut, en fractions de l'écran (voir Config.apply_defaults)
+
+    @property
+    def reference_templates(self) -> Path | None:
+        return GAMES_DIR / self.reference / "templates" if self.reference else None
 
     @property
     def config_path(self) -> Path:
@@ -37,7 +45,8 @@ class Game:
 
 def load_game(path: Path) -> Game:
     data = json.loads((path / "game.json").read_text(encoding="utf-8"))
-    return Game(path.name, data.get("name", path.name), path, data.get("riichi_hint", ""))
+    return Game(path.name, data.get("name", path.name), path, data.get("riichi_hint", ""),
+                data.get("reference", ""), data.get("zones"))
 
 
 def list_games() -> list[Game]:

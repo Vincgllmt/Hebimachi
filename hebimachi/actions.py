@@ -362,3 +362,29 @@ def evaluate_prompt(hand13: list[int], word: str, ctx: Context, visible: list[in
         if d is not None:
             out.append((t, d))
     return out
+
+
+# ---------- appel déduit de la main, quand l'écran ne montre pas les tuiles appelées ----------
+def infer_call(before: list[int], after: list[int], tile: int) -> tuple[int, ...] | None:
+    """Tuiles de la main utilisées par un chi ou un pon sur `tile`, fait entre deux lectures.
+
+    `before` est la main avant l'appel, `after` la main lue maintenant : sans les deux tuiles de
+    l'appel (11 tuiles pour une main de 13), et peut-être déjà sans la défausse qui suit (10).
+    Renvoie None si aucun appel n'explique le changement, ou si plusieurs l'expliquent.
+    """
+    left = to_counts(before)
+    for t in after:
+        if left[t] == 0:
+            return None  # une tuile nouvelle : pioche ou autre chose qu'un appel
+        left[t] -= 1
+    removed = sum(left)
+    if removed not in (2, 3):
+        return None
+    found = set()
+    for kind, used in _options(to_counts(before), tile, True):
+        if kind == "KAN":
+            continue
+        need = to_counts(list(used))
+        if all(left[t] >= need[t] for t in range(34)):
+            found.add(used)
+    return found.pop() if len(found) == 1 else None

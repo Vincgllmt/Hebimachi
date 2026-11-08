@@ -5,5 +5,71 @@
     "Riichi : plus de 4 tuiles au mur et au moins 1 000 points ; le bouton n'apparaît qu'après Carré en début de tour.",
     "Interface en français : le vent Ouest est noté « O » sur les panneaux des joueurs.",
     "Boutons d'action : Chi, Pon, Kan, Ron, Riichi appris ; Tsumo pas encore."
-  ]
+  ],
+  "zones": {
+    "hand": [
+      0.1875,
+      0.7815,
+      0.5724,
+      0.1806
+    ],
+    "dora": [
+      0.3458,
+      0.4167,
+      0.15,
+      0.1019
+    ],
+    "calls": [
+      0.4688,
+      0.8056,
+      0.5307,
+      0.1574
+    ],
+    "rivers": {
+      "me": [
+        0.3141,
+        0.6352,
+        0.3859,
+        0.1796
+      ],
+      "toimen": [
+        0.325,
+        0.0944,
+        0.3693,
+        0.1907
+      ],
+      "kamicha": [
+        0.1927,
+        0.1759,
+        0.0911,
+        0.5278
+      ],
+      "shimocha": [
+        0.7406,
+        0.1259,
+        0.1224,
+        0.6685
+      ]
+    },
+    "extra": {
+      "seat": [
+        0.3542,
+        0.5667,
+        0.0391,
+        0.0787
+      ],
+      "round": [
+        0.5417,
+        0.3935,
+        0.0781,
+        0.0694
+      ],
+      "prompt": [
+        0.8333,
+        0.3981,
+        0.1661,
+        0.5556
+      ]
+    }
+  }
 }

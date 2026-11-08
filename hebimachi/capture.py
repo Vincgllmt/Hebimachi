@@ -41,6 +41,30 @@ class Config:
             return cls(**data)
         return cls()
 
+    def apply_defaults(self, zones: dict | None, width: int, height: int) -> bool:
+        """Remplit les zones manquantes avec celles du jeu, données en fractions de l'écran.
+
+        L'affichage d'un jeu en plein écran ne dépend que de la résolution : ces zones valent
+        sur toutes les machines. Renvoie True si quelque chose a été rempli.
+        """
+        if not zones:
+            return False
+
+        def px(r) -> Region:
+            return (round(r[0] * width), round(r[1] * height), round(r[2] * width), round(r[3] * height))
+
+        changed = False
+        for key in ("hand", "dora", "calls"):
+            if getattr(self, key) is None and zones.get(key):
+                setattr(self, key, px(zones[key]))
+                changed = True
+        for group, target in (("rivers", self.rivers), ("extra", self.extra)):
+            for key, r in zones.get(group, {}).items():
+                if key not in target:
+                    target[key] = px(r)
+                    changed = True
+        return changed
+
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")

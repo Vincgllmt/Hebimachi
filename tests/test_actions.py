@@ -66,3 +66,18 @@ def test_call_refused_without_yaku_route():
 def test_closed_kan():
     d = check_closed_kan(parse("1111m456p789s23m55z"), Context())
     assert d is not None and d.recommend
+
+
+def test_infer_call_from_hand_change():
+    from hebimachi.actions import infer_call
+    before = parse("1244699m56s37p57z")
+    # Chi sur 3m avec 2m et 4m : la main perd ces deux tuiles…
+    assert infer_call(before, parse("14699m56s37p57z"), parse("3m")[0]) == tuple(parse("24m"))
+    # …puis la défausse qui suit (7z) : l'appel reste reconnaissable.
+    assert infer_call(before, parse("14699m56s37p5z"), parse("3m")[0]) == tuple(parse("24m"))
+    # Pon sur 9m.
+    assert infer_call(before, parse("12446m56s37p57z"), parse("9m")[0]) == tuple(parse("99m"))
+    # Une tuile nouvelle (pioche) : pas un appel.
+    assert infer_call(before, parse("14699m56s37p57z1s"), parse("3m")[0]) is None
+    # Deux appels possibles expliquent le changement (34m+5m ou 46m+5m) : on ne devine pas.
+    assert infer_call(parse("3468m"), parse("8m"), parse("5m")[0]) is None

@@ -24,7 +24,10 @@ Choisissez le jeu dans la liste en haut de la fenêtre. Chaque jeu a son dossier
 appris lui sont propres, et sont à refaire pour chaque nouveau jeu.
 
 Pour ajouter un jeu, créez son dossier avec un `game.json` (`{"name": "Yakuza Kiwami"}`) : il
-apparaît dans la liste, et il ne reste qu'à le calibrer. Un seul jeu est configuré pour l'instant :
+apparaît dans la liste, et il ne reste qu'à le calibrer. Si ses tuiles ressemblent à celles d'un jeu
+déjà appris, ajoutez `"reference": "ishin"` : à chaque capture, les tuiles que les modèles de ce jeu
+reconnaissent sans ambiguïté sont apprises toutes seules (main d'abord, puis rivières et dora, dont
+les modèles sont remplacés quand la tuile passe dans la main). C'est le cas de Yakuza Kiwami. Un seul jeu est configuré pour l'instant :
 *Like a Dragon: Ishin!*, sur lequel la lecture du mahjong est validée.
 
 ## Mahjong
